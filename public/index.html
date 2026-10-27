@@ -483,15 +483,15 @@ const KEYMAPS = {
   kbD: { label: 'Keyboard: Numpad 8456, A=0 B=.', short: 'Numpad 8456 (A 0, B .)', up: ['Numpad8'], down: ['Numpad5', 'Numpad2'], left: ['Numpad4'], right: ['Numpad6'], a: ['Numpad0', 'NumpadEnter'], b: ['NumpadDecimal'] }
 };
 const DEVICES = ['kbA', 'kbB', 'kbC', 'kbD', 'pad0', 'pad1', 'pad2', 'pad3', 'touch'];
-const NONE = Object.freeze({ x: 0, y: 0, a: false, b: false, pa: false, pb: false, pu: false, pd: false, pl: false, pr: false, ps: false, on: false });
+const NONE = Object.freeze({ x: 0, y: 0, a: false, b: false, pa: false, pb: false, pu: false, pd: false, pl: false, pr: false, ps: false, on: false, ph: false, px: 0, py: 0, pdn: false, ppr: false, prl: false, pmv: false });
 const GAMEKEYS = new Set(['Space', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 Object.values(KEYMAPS).forEach(m => ['up', 'down', 'left', 'right', 'a', 'b'].forEach(k => m[k].forEach(c => GAMEKEYS.add(c))));
 const Touch = { up: false, down: false, left: false, right: false, a: false, b: false, ax: 0, ay: 0 };
 const KN = { Space: 'Space', ShiftRight: 'Right Shift', Slash: '/', Period: '.', NumpadDecimal: 'Num .', Numpad0: 'Num 0', NumpadEnter: 'Num Enter', Enter: 'Enter' };
 const keyName = k => KN[k] || k.replace(/^Key/, '');
-const legend = id => { const m = KEYMAPS[id]; if (m) return `${m.short.split(' (')[0]} to move · A = ${m.a.map(keyName).join(' or ')} · B = ${m.b.map(keyName).join(' or ')}`; return id === 'touch' ? 'On-screen D-pad, A and B buttons' : 'Stick or D-pad to move · A and B buttons'; };
-const devLabel = id => KEYMAPS[id] ? KEYMAPS[id].label : id === 'touch' ? 'Touch pad (on-screen buttons)' : 'Gamepad ' + (+id.slice(3) + 1);
-const devShort = id => KEYMAPS[id] ? KEYMAPS[id].short : id === 'touch' ? 'Touch pad' : 'Gamepad ' + (+id.slice(3) + 1);
+const legend = id => { const m = KEYMAPS[id]; if (m) return `${m.short.split(' (')[0]} to move · A = ${m.a.map(keyName).join(' or ')} · B = ${m.b.map(keyName).join(' or ')}`; return id === 'touch' ? 'Mouse or touch: click, tap or drag the game itself' : 'Stick or D-pad to move · A and B buttons'; };
+const devLabel = id => KEYMAPS[id] ? KEYMAPS[id].label : id === 'touch' ? 'Mouse / touch screen' : 'Gamepad ' + (+id.slice(3) + 1);
+const devShort = id => KEYMAPS[id] ? KEYMAPS[id].short : id === 'touch' ? 'Mouse / touch' : 'Gamepad ' + (+id.slice(3) + 1);
 
 const Input = (() => {
   const keys = new Set(), cur = {}, prev = {}, lat = {};
@@ -544,12 +544,21 @@ const Input = (() => {
 
 /* ---------- input frames: what travels between two machines ---------- */
 const QN = 10;
-const packRaw = r => { const x = Math.round(clamp(r.x, -1, 1) * QN) + QN, y = Math.round(clamp(r.y, -1, 1) * QN) + QN; return ((x * 21 + y) << 2) | (r.a ? 1 : 0) | (r.b ? 2 : 0); };
-const unpackRaw = v => { const bt = v & 3, xy = v >> 2, y = xy % 21, x = (xy - y) / 21; return { x: (x - QN) / QN, y: (y - QN) / QN, a: !!(bt & 1), b: !!(bt & 2) }; };
+const PQ = 1764;
+const packRaw = (r, pq) => { const x = Math.round(clamp(r.x, -1, 1) * QN) + QN, y = Math.round(clamp(r.y, -1, 1) * QN) + QN; return (((x * 21 + y) << 2) | (r.a ? 1 : 0) | (r.b ? 2 : 0)) + PQ * (pq || 0); };
+/* pointer (mouse or finger) travels in the frame too: 0 = none, else 1 + down + 2*(qx + 128*qy) */
+const packPtr = p => { if (!p) return 0; const qx = clamp(Math.round(p.x / W * 127), 0, 127), qy = clamp(Math.round(p.y / H * 79), 0, 79); return 1 + (p.down ? 1 : 0) + 2 * (qx + 128 * qy); };
+const unpackRaw = v => {
+  const pq = Math.floor(v / PQ), b0 = v - pq * PQ, bt = b0 & 3, xy = b0 >> 2, y = xy % 21, x = (xy - y) / 21;
+  const o = { x: (x - QN) / QN, y: (y - QN) / QN, a: !!(bt & 1), b: !!(bt & 2), ph: false, px: 0, py: 0, pdn: false };
+  if (pq > 0) { const k = pq - 1, q = k >> 1, qx = q % 128, qy = (q - qx) / 128; o.ph = true; o.pdn = !!(k & 1); o.px = qx / 127 * W; o.py = qy / 79 * H; }
+  return o;
+};
 const NEUTRAL = packRaw({ x: 0, y: 0, a: false, b: false });
 function derive(prev, cur) {
-  const u = cur.y < -.5, d = cur.y > .5, l = cur.x < -.5, r = cur.x > .5;
-  return { x: cur.x, y: cur.y, a: cur.a, b: cur.b, pa: cur.a && !prev.a, pb: cur.b && !prev.b, pu: u && !prev.u, pd: d && !prev.d, pl: l && !prev.l, pr: r && !prev.r, ps: false, on: true, u, d, l, r };
+  const u = cur.y < -.5, d = cur.y > .5, l = cur.x < -.5, r = cur.x > .5, pdn = !!(cur.ph && cur.pdn);
+  return { x: cur.x, y: cur.y, a: cur.a, b: cur.b, pa: cur.a && !prev.a, pb: cur.b && !prev.b, pu: u && !prev.u, pd: d && !prev.d, pl: l && !prev.l, pr: r && !prev.r, ps: false, on: true, u, d, l, r,
+    ph: !!cur.ph, px: cur.ph ? cur.px : (prev.px || 0), py: cur.ph ? cur.py : (prev.py || 0), pdn, ppr: pdn && !prev.pdn, prl: !pdn && !!prev.pdn, pmv: !!cur.ph && (cur.px !== prev.px || cur.py !== prev.py) };
 }
 
 /* ---------- game registry ---------- */
@@ -749,13 +758,13 @@ const Net = (() => {
 /* ---------- app ---------- */
 const App = (() => {
   const DEFAULT_SEATS = [
-    { name: 'Player 1', device: IS_COARSE ? 'touch' : 'kbA', on: true }, { name: 'Player 2', device: IS_COARSE ? 'touch' : 'kbB', on: true },
+    { name: 'Player 1', device: 'touch', on: true }, { name: 'Player 2', device: IS_COARSE ? 'touch' : 'kbB', on: true },
     { name: 'Player 3', device: 'pad0', on: false }, { name: 'Player 4', device: 'pad1', on: false }];
   let seats, wins, bestOf = 3, filter = 'all', sel = 0, view = 'hub', match = null, padSig = '', last = 0, dpr = 1, ready = false;
-  let myDev = IS_COARSE ? 'touch' : 'kbA', nick = 'Player';
+  let myDev = 'touch', nick = 'Player';
   const cv = $('#cv'), g = cv.getContext('2d');
 
-  const saveSeats = () => store.set('seats', seats.map(s => ({ name: s.name, device: s.device, on: s.on })));
+  const saveSeats = () => store.set('seats2', seats.map(s => ({ name: s.name, device: s.device, on: s.on })));
   let query = '';
   const visibleList = () => Games.filter(x => (filter === 'all' || x.kind === filter) && (!query || (x.title + ' ' + x.blurb).toLowerCase().includes(query)));
   function toast(msg) {
@@ -796,7 +805,7 @@ const App = (() => {
       if (s.device.startsWith('pad')) {
         const n = Input.padName(+s.device.slice(3));
         st = n ? 'Connected: ' + n : 'Not detected yet. Press a button on the controller.';
-      } else if (s.device === 'touch') st = 'On-screen D-pad and A/B buttons appear under the game.';
+      } else if (s.device === 'touch') st = 'Click, tap or drag the game itself. No keys or buttons needed.';
       else st = 'Keys: ' + KEYMAPS[s.device].short + '. Spare keys: ' + KEYMAPS[s.device].a.concat(KEYMAPS[s.device].b).map(keyName).join(', ') + '.';
       const twin = seats.findIndex((o, j) => j !== i && o.on && s.on && o.device === s.device);
       if (twin >= 0) st = 'Shared with seat ' + (twin + 1) + '. Pass it around in turn-based games.';
@@ -934,15 +943,16 @@ const App = (() => {
     $('#quit').textContent = m.online ? 'Leave match' : 'Back to shelf';
     const usesTouch = m.online ? m.dev === 'touch' : players.some(p => p.device === 'touch');
     curTouch = usesTouch; syncTouchUI();
-    if (usesTouch && touchMode === 'screen') toast('Touch the screen: drag on the left to move, hold the right side for A, a second finger there for B');
-    const ctl = m.online ? `You: ${legend(m.dev)}` : players.map(p => `${p.name}: ${legend(p.device)}`).join('   |   ');
+    if (usesTouch && touchMode === 'screen') toast(m.game.drag ? 'Drag with your finger or mouse' : m.game.pointer ? 'Click or tap what you want' : m.game.tapA ? 'Click or tap to play' : 'Drag on the left to move, press on the right for action');
+    const lg = id => id !== 'touch' ? legend(id) : (m.game.touch || (m.game.drag ? 'Move the mouse or drag a finger to control it. Click or press to act.' : m.game.pointer ? 'Click or tap what you want.' : m.game.tapA ? 'Click or tap to play.' : 'Drag on the left side to move, press on the right side to act.'));
+    const ctl = m.online ? `You: ${lg(m.dev)}` : players.map(p => `${p.name}: ${lg(p.device)}`).join('   |   ');
     $('#help').innerHTML = '';
     $('#help').append(h('b', {}, def.title + '. '), def.help, h('span', { class: 'ctl' }, ctl));
     beginRound(); window.scrollTo(0, 0);
   }
   function beginRound() {
     const m = match; Rng.seed(hash32(m.seed + ':' + m.round));
-    m.game.reset(m.round - 1); m.turn = -1; m.state = 'count';
+    m.turn = -1; m.game.reset(m.round - 1); m.state = 'count';
     m.t = m.def.kind === 'turns' ? 1.1 : 3.6; m.lastN = -1; m.auto = 0; m.autoFn = null;
     hideOverlay(); updateChips();
   }
@@ -978,7 +988,7 @@ const App = (() => {
     hideOverlay(); match = null; view = 'hub';
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
     $('#stage').hidden = true; $('#hub').hidden = false; $('#touchpad').hidden = true; $('#waiting').hidden = true;
-    Object.keys(Touch).forEach(k => { Touch[k] = typeof Touch[k] === 'number' ? 0 : false; }); vp.clear(); drags.clear();
+    Object.keys(Touch).forEach(k => { Touch[k] = typeof Touch[k] === 'number' ? 0 : false; }); vp.clear(); fingers.clear(); mouse.down = false;
     syncSeats(); renderOnline(); markSel(true);
   }
   function pause() {
@@ -1019,7 +1029,22 @@ const App = (() => {
 
   /* ----- simulation ----- */
   const stateHash = m => hash32([Rng.state, m.round, m.wins.join(), m.state, m.tick].join('|'));
-  function setSt(m, i, packed) { const s = derive(m.pd[i], unpackRaw(packed)); m.pd[i] = s; m.st[i] = s; }
+  function setSt(m, i, packed) {
+    const u = unpackRaw(packed), prev = m.pd[i], g = m.game;
+    if (g && m.state === 'play') {
+      if (g.drag) {
+        if (u.ph) {
+          const cur = g.drag(i), ax = g.dragAxes || 'xy'; u.x = 0; u.y = 0;
+          if (cur) {
+            if (ax.includes('x')) { const dx = u.px - cur.x; u.x = Math.abs(dx) < 3 ? 0 : clamp(dx / 22, -1, 1); }
+            if (ax.includes('y')) { const dy = u.py - cur.y; u.y = Math.abs(dy) < 3 ? 0 : clamp(dy / 22, -1, 1); }
+          }
+        }
+        u.a = g.dragFire ? (!!prev.pdn && !u.pdn) : (u.ph && u.pdn);
+      } else if (g.tapA) u.a = u.ph ? u.pdn : u.a;
+    }
+    const s = derive(prev, u); m.pd[i] = s; m.st[i] = s;
+  }
   function tickCore(m) {
     if (m.state === 'count') {
       m.t -= TICK; const cd = $('#countdown');
@@ -1031,7 +1056,15 @@ const App = (() => {
       }
       if (m.t <= 0) { m.state = 'play'; cd.hidden = true; if (live) Sound.play('go'); }
     } else if (m.state === 'play') {
-      try { m.game.update(TICK); } catch (e) { console.error(e); }
+      try {
+        if (m.game.pointer) m.st.forEach((s, i) => {
+          if (m.def.kind === 'turns' && m.turn !== i) return;
+          if (s.ph && s.pmv) m.game.pointer(s.px, s.py, 'move', i);
+          if (s.ph && s.ppr) m.game.pointer(s.px, s.py, 'down', i);
+          if (s.prl) m.game.pointer(s.px, s.py, 'up', i);
+        });
+        m.game.update(TICK);
+      } catch (e) { console.error(e); }
     } else if (m.state === 'roundover' && m.auto > 0) {
       if (--m.auto === 0) { const f = m.autoFn; m.autoFn = null; if (f) f(); }
     }
@@ -1044,15 +1077,15 @@ const App = (() => {
     let n = 0;
     while (m.acc >= TICK && n < 6 && match === m && m.state !== 'paused') {
       m.acc -= TICK; n++;
-      const cache = {};
-      m.players.forEach((p, i) => { if (p.device === 'touch' && dragOn(m)) { setSt(m, i, packRaw(sampleFor(m, 'touch', i))); return; } if (cache[p.device] === undefined) cache[p.device] = packRaw(Input.sample(p.device)); setSt(m, i, cache[p.device]); });
+      const cache = {}, snap = ptrSnap();
+      m.players.forEach((p, i) => { if (cache[p.device] === undefined) cache[p.device] = Input.sample(p.device); setSt(m, i, packRaw(cache[p.device], p.device === 'touch' ? packPtr(ptrFor(m, snap, i)) : 0)); });
       tickCore(m);
     }
   }
   function onlineAdvance(m, dt) {
     if (m.state === 'desync') return;
     m.acc = Math.min(m.acc + dt, TICK * 4);
-    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(sampleFor(m, m.dev, m.li))); }
+    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(Input.sample(m.dev), m.dev === 'touch' ? packPtr(ptrFor(m, ptrSnap(), m.li)) : 0)); }
     if (m.acc >= TICK) m.acc = TICK;
     let k = 0, ran = false;
     while (k < 10 && match === m && m.state !== 'desync') {
@@ -1108,52 +1141,63 @@ const App = (() => {
     const r = cv.getBoundingClientRect();
     return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
   }
-  /* touch-screen controls: drag on the left half = stick, hold the right half = A, a second finger on the right = B.
-     Board games that have their own tap targets still use direct taps when played on one device. */
-  /* direct drag: games that expose drag(i) follow your finger (paddles, crosshairs, droppers) */
-  const drags = new Map(), dragA = [0, 0, 0, 0];
+  /* mouse and touch: the pointer itself is the controller. It travels inside the input frame, so online play stays in sync.
+     Games may expose drag(i) (object follows the pointer), pointer(x,y,type,i) (click targets) or tapA (press = A);
+     anything else falls back to a floating stick on the left half, A on the right half. */
   let touchMode = store.get('touchMode', 'screen'), curTouch = false;
-  const dragOn = m => curTouch && touchMode === 'screen' && m && m.game && typeof m.game.drag === 'function';
+  const mouse = { x: 0, y: 0, in: false, down: false, latch: false, t: 0 }, fingers = new Map();
   const touchSeats = m => m.online ? [m.li] : m.players.map((p, i) => p.device === 'touch' ? i : -1).filter(i => i >= 0);
-  const playerForX = (m, x) => { const t = touchSeats(m); if (t.length < 2) return t[0] === undefined ? 0 : t[0]; return x < W / 2 ? t[0] : t[1]; };
-  function sampleFor(m, dev, i) {
-    const r = Input.sample(dev);
-    if (dev !== 'touch' || !dragOn(m)) return r;
-    let tgt = null; for (const d of drags.values()) if (d.pi === i && (!tgt || d.t > tgt.t)) tgt = d;
-    const cur = m.game.drag(i), ax = m.game.dragAxes || 'xy';
-    r.x = 0; r.y = 0;
-    if (tgt && cur) { if (ax.includes('x')) { const dx = tgt.x - cur.x; r.x = Math.abs(dx) < 3 ? 0 : clamp(dx / 28, -1, 1); } if (ax.includes('y')) { const dy = tgt.y - cur.y; r.y = Math.abs(dy) < 3 ? 0 : clamp(dy / 28, -1, 1); } }
-    r.a = r.a || performance.now() < dragA[i];
-    return r;
+  function ptrSnap() {
+    const out = [];
+    if (mouse.in || mouse.down) out.push({ x: mouse.x, y: mouse.y, down: mouse.down || mouse.latch, t: mouse.t });
+    mouse.latch = false;
+    for (const [id, p] of fingers) { out.push({ x: p.x, y: p.y, down: p.down || p.latch, t: p.t }); p.latch = false; if (p.ended) fingers.delete(id); }
+    return out;
+  }
+  function ptrFor(m, snap, i) {
+    const seats = touchSeats(m), k = seats.indexOf(i); if (k < 0 || !snap.length) return null;
+    let c = snap;
+    if (m.def.kind !== 'turns' && seats.length > 1) c = snap.filter(p => Math.min(seats.length - 1, Math.floor(p.x / W * seats.length)) === k);
+    let best = null; for (const p of c) if (!best || p.t > best.t) best = p;
+    return best;
   }
   const vp = new Map();
-  const syncTouchUI = () => { $('#touchpad').hidden = !curTouch || touchMode !== 'buttons'; const t = $('#tmode'); t.hidden = !curTouch; t.textContent = touchMode === 'screen' ? 'Touch: screen' : 'Touch: buttons'; };
-  const virtOn = () => curTouch && touchMode === 'screen' && match && match.state === 'play';
-  cv.addEventListener('pointerdown', e => {
-    if (!match || match.state !== 'play') return;
-    if (match.game.pointer && !match.online) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'down'); return; }
-    if (!virtOn() || e.pointerType === 'mouse') return;
-    e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch (er) { }
-    if (match.game.drag) { const [x, y] = pointerPos(e); drags.set(e.pointerId, { x, y, sx: x, sy: y, t: performance.now(), t0: performance.now(), pi: playerForX(match, x) }); return; }
-    const r = cv.getBoundingClientRect(); let role;
-    if (e.clientX - r.left < r.width / 2) { if ([...vp.values()].some(v => v.role === 'stick')) return; role = 'stick'; }
-    else { role = !Touch.a ? 'a' : 'b'; if (Touch[role]) return; Touch[role] = true; }
-    vp.set(e.pointerId, { role, sx: e.clientX, sy: e.clientY });
-  });
-  cv.addEventListener('pointermove', e => {
-    if (!match || match.state !== 'play') return;
-    if (match.game.pointer && !match.online) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'move'); return; }
-    const dg = drags.get(e.pointerId); if (dg) { const [x, y] = pointerPos(e); dg.x = x; dg.y = y; dg.t = performance.now(); return; }
-    const v = vp.get(e.pointerId); if (!v || v.role !== 'stick') return;
+  const plain = () => { const g2 = match && match.game; return g2 && !g2.drag && !g2.pointer && !g2.tapA && !g2.pointerRaw; };
+  const syncTouchUI = () => { $('#touchpad').hidden = !curTouch || touchMode !== 'buttons'; const t = $('#tmode'); t.hidden = !curTouch; t.textContent = touchMode === 'screen' ? 'Pointer controls' : 'Buttons on'; };
+  const virtOn = () => curTouch && touchMode === 'screen' && match;
+  function stickTo(v, e) {
     const R = Math.max(36, cv.getBoundingClientRect().width * .06); let dx = (e.clientX - v.sx) / R, dy = (e.clientY - v.sy) / R; const m = Math.hypot(dx, dy);
     if (m > 1) { dx /= m; dy /= m; v.sx += (m - 1) * R * dx; v.sy += (m - 1) * R * dy; }
     Touch.ax = m < .28 ? 0 : Math.round(dx * 10) / 10; Touch.ay = m < .28 ? 0 : Math.round(dy * 10) / 10;
+  }
+  cv.addEventListener('pointerdown', e => {
+    if (!virtOn()) return;
+    e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch (er) { }
+    const [x, y] = pointerPos(e), now = performance.now();
+    if (e.pointerType === 'mouse') { mouse.x = x; mouse.y = y; mouse.in = true; mouse.t = now; if (e.button === 0) { mouse.down = true; mouse.latch = true; } }
+    else fingers.set(e.pointerId, { x, y, down: true, latch: true, ended: false, t: now });
+    if (!plain() || match.state !== 'play') return;
+    const r = cv.getBoundingClientRect(); let role;
+    if (e.pointerType === 'mouse' && e.button === 2) role = 'b';
+    else if (e.clientX - r.left < r.width / 2) { if ([...vp.values()].some(v => v.role === 'stick')) return; role = 'stick'; }
+    else { role = !Touch.a ? 'a' : 'b'; if (Touch[role]) return; Touch[role] = true; }
+    vp.set(e.pointerId, { role, sx: e.clientX, sy: e.clientY }); if (role === 'b') Touch.b = true;
   });
+  cv.addEventListener('pointermove', e => {
+    if (!virtOn()) return;
+    const [x, y] = pointerPos(e), now = performance.now();
+    if (e.pointerType === 'mouse') { mouse.x = x; mouse.y = y; mouse.in = true; mouse.t = now; }
+    else { const f = fingers.get(e.pointerId); if (f) { f.x = x; f.y = y; f.t = now; } }
+    const v = vp.get(e.pointerId); if (v && v.role === 'stick') stickTo(v, e);
+  });
+  cv.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !mouse.down) mouse.in = false; });
   const vrel = e => {
-    const dg = drags.get(e.pointerId);
-    if (dg) { drags.delete(e.pointerId); const f = match && match.game && match.game.dragFire; if (f === 'release' || (f === 'tap' && performance.now() - dg.t0 < 260 && Math.hypot(dg.x - dg.sx, dg.y - dg.sy) < 24)) dragA[dg.pi] = performance.now() + 110; return; }
-    const v = vp.get(e.pointerId); if (!v) return; vp.delete(e.pointerId); if (v.role === 'stick') { Touch.ax = 0; Touch.ay = 0; } else Touch[v.role] = false; };
-  cv.addEventListener('pointerup', vrel); cv.addEventListener('pointercancel', vrel); cv.addEventListener('lostpointercapture', vrel);
+    if (e.pointerType === 'mouse') { if (e.type === 'pointerup' && e.button !== 0) { } else mouse.down = false; }
+    else { const f = fingers.get(e.pointerId); if (f) { f.down = false; f.ended = true; } }
+    const v = vp.get(e.pointerId); if (!v) return; vp.delete(e.pointerId);
+    if (v.role === 'stick') { Touch.ax = 0; Touch.ay = 0; } else Touch[v.role] = false;
+  };
+  cv.addEventListener('pointerup', vrel); cv.addEventListener('pointercancel', vrel);
   cv.addEventListener('contextmenu', e => e.preventDefault());
   addEventListener('keydown', e => {
     if (view === 'game') {
@@ -1194,15 +1238,15 @@ const App = (() => {
   };
 
   function init() {
-    const saved = store.get('seats', null);
+    const saved = store.get('seats2', null);
     seats = DEFAULT_SEATS.map((d, i) => Object.assign({}, d, (saved && saved[i]) || {}));
     wins = store.get('wins', [0, 0, 0, 0]);
     bestOf = store.get('bestOf', 3);
-    myDev = store.get('mydev', myDev);
+    myDev = store.get('mydev2', myDev);
     nick = store.get('nick', 'Player ' + (1 + Math.floor(Math.random() * 99)));
     buildSeats(); syncSeats(); renderShelf();
     const nk = $('#nick'); nk.value = nick; nk.addEventListener('input', e => { nick = e.target.value.trim().slice(0, 14) || 'Player'; store.set('nick', nick); Net.setNick(nick); });
-    $('#mydev').addEventListener('change', e => { myDev = e.target.value; store.set('mydev', myDev); });
+    $('#mydev').addEventListener('change', e => { myDev = e.target.value; store.set('mydev2', myDev); });
     $('#mk').onclick = () => joinRoom(genCode(), true);
     $('#jn').onclick = () => joinRoom($('#jc').value, false);
     $('#jc').addEventListener('keydown', e => { if (e.code === 'Enter') joinRoom($('#jc').value, false); });
@@ -1231,7 +1275,7 @@ const App = (() => {
       else toast('Fullscreen is not available here');
     };
     const tp = $('#touchpad');
-    $('#tmode').onclick = () => { touchMode = touchMode === 'screen' ? 'buttons' : 'screen'; store.set('touchMode', touchMode); vp.clear(); drags.clear(); Touch.ax = Touch.ay = 0; Touch.a = Touch.b = false; syncTouchUI(); toast(touchMode === 'screen' ? 'Touch the screen to play' : 'On-screen buttons on'); };
+    $('#tmode').onclick = () => { touchMode = touchMode === 'screen' ? 'buttons' : 'screen'; store.set('touchMode', touchMode); vp.clear(); fingers.clear(); mouse.down = false; Touch.ax = Touch.ay = 0; Touch.a = Touch.b = false; syncTouchUI(); toast(touchMode === 'screen' ? 'Touch the screen to play' : 'On-screen buttons on'); };
     tp.addEventListener('pointerdown', e => {
       const b = e.target.closest ? e.target.closest('[data-k]') : null; if (!b) return; e.preventDefault();
       Touch[b.dataset.k] = true; b.classList.add('on'); try { b.setPointerCapture(e.pointerId); } catch (er) { }
@@ -1390,7 +1434,7 @@ registerGame({
   },
   create(api) {
     const n = api.n, col = i => api.players[i].color, G = 380;
-    let ground, tanks, turn, wind, proj, boom, state, wait, stars = [];
+    let ground, tanks, turn, wind, proj, boom, state, wait, stars = [], pd = false, shoot = false;
     const gy = x => ground[clamp(Math.round(x), 0, W)];
     function after() {
       const al = tanks.map((t, i) => t.alive ? i : -1).filter(i => i >= 0);
@@ -1443,7 +1487,15 @@ registerGame({
       }
     }
     return {
+      touch: 'Press, pull back from your tank and let go to fire. The farther you pull, the more power.',
+      pointer(x, y, t) {
+        if (state !== 'aim') return; const tk = tanks[turn], bx = tk.x, by = tk.y - 14;
+        if (t === 'down') pd = true;
+        if (pd && (t === 'down' || t === 'move')) { const dx = bx - x, dy = y - by, d = Math.hypot(dx, dy); if (d > 6) tk.ang = clamp(Math.atan2(dy, dx) * 180 / Math.PI, 0, 180); tk.pow = clamp(d / 1.8, 10, 100); }
+        if (t === 'up' && pd) { pd = false; shoot = true; }
+      },
       reset(r) {
+        pd = false; shoot = false;
         const p1 = rand(0, TAU), p2 = rand(0, TAU), p3 = rand(0, TAU);
         ground = new Float32Array(W + 1);
         for (let x = 0; x <= W; x++) ground[x] = clamp(G + 60 * Math.sin(x * .0072 + p1) + 32 * Math.sin(x * .0185 + p2) + 14 * Math.sin(x * .047 + p3), 240, 520);
@@ -1460,8 +1512,8 @@ registerGame({
         tanks.forEach(t => { t.y = gy(t.x); });
         if (state === 'aim') {
           const t = tanks[turn], s = api.input(turn);
-          t.ang = clamp(t.ang - s.x * 75 * dt, 0, 180); t.pow = clamp(t.pow - s.y * 45 * dt, 10, 100);
-          if (s.pa) fire();
+          if (!pd) { t.ang = clamp(t.ang - s.x * 75 * dt, 0, 180); t.pow = clamp(t.pow - s.y * 45 * dt, 10, 100); }
+          if (s.pa || shoot) { shoot = false; pd = false; fire(); }
         } else if (state === 'fly') { for (let k = 0; k < 4 && proj; k++) stepProj(dt / 4); }
         else if (state === 'boom') { boom.t += dt; if (boom.t > (boom.miss ? .5 : .9)) after(); }
         else if (state === 'done') {
@@ -1593,6 +1645,7 @@ registerGame({
       if (al.length <= 1 && !over) { over = true; endT = 1; winner = al.length ? al[0] : -1; }
     }
     return {
+      dragAxes: 'xy', drag: i => { const b = sn[i] && sn[i].alive && sn[i].body[0]; return b ? { x: b[0] * CS + CS / 2, y: b[1] * CS + CS / 2 } : null; },
       reset() {
         sn = []; food = []; over = false; acc = 0; tm = 0; winner = -1;
         for (let i = 0; i < n; i++) {
@@ -1671,6 +1724,7 @@ registerGame({
       bul.push({ x, y, vx: Math.cos(t.a) * BS, vy: Math.sin(t.a) * BS, o: i, n: 0, age: 0 }); t.cd = .35; api.beep('shot');
     }
     return {
+      dragAxes: 'xy', drag: i => tanks[i],
       reset() {
         layout(); bul = []; parts = []; over = false; winner = -1; endT = 0;
         tanks = Array.from({ length: n }, (_, i) => ({ x: SPAWN[i][0], y: SPAWN[i][1], a: Math.atan2(H / 2 - SPAWN[i][1], W / 2 - SPAWN[i][0]), alive: true, cd: .4 }));
@@ -1738,6 +1792,7 @@ registerGame({
     const n = api.n, col = i => api.players[i].color, CX = W / 2, CY = H / 2, R0 = 255, PR = 27;
     let pl, t, arR, over, endT, winner;
     return {
+      dragAxes: 'xy', drag: i => pl[i].out ? null : pl[i],
       reset() {
         t = 0; arR = R0; over = false; endT = 0; winner = -1;
         pl = Array.from({ length: n }, (_, i) => { const a = i / n * TAU + Math.PI / 4; return { x: CX + Math.cos(a) * 140, y: CY + Math.sin(a) * 140, vx: 0, vy: 0, out: false, fall: 0, dash: 0, fx: -Math.cos(a), fy: -Math.sin(a) }; });
@@ -1797,6 +1852,7 @@ registerGame({
     const n = api.n, col = i => api.players[i].color;
     let ph, lit, tNext, goAt, fouled, winner, ms, endT, flash;
     return {
+      tapA: true,
       reset() { ph = 'lights'; lit = 0; tNext = .9; fouled = Array(n).fill(false); flash = Array(n).fill(0); winner = -1; ms = 0; endT = 0; goAt = 0; },
       update(dt) {
         flash = flash.map(f => Math.max(0, f - dt));
@@ -2324,6 +2380,8 @@ registerGame({
     let turn, thrown, scores, aim = makeAimer(), phase, ball, binX, over, endT, winner, res, rt, trail, anim;
     function newBin() { binX = irand(430, 860); }
     return {
+      touch: 'Press, pull back from the thrower and let go. The farther you pull, the harder.',
+      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, OX, OY); },
       reset(r) { turn = r % 2; thrown = [0, 0]; scores = [0, 0]; phase = 'aim'; aim.reset(-.95); newBin(); over = false; endT = 0; winner = -1; res = ''; rt = 0; trail = []; anim = 0; api.turn(turn); },
       update(dt) {
         anim += dt;
@@ -2380,6 +2438,7 @@ registerGame({
     const LEN = 5200, col = i => api.players[i].color;
     let b, over, endT, winner, t;
     return {
+      tapA: true, touch: 'Press and hold to speed up. Right-click or a second finger lowers the nose.',
       reset() { b = [0, 1].map(() => ({ x: 0, v: 0, th: 0, stun: 0, boost: false })); over = false; endT = 0; winner = -1; t = 0; },
       update(dt) {
         t += dt; if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, winner >= 0 ? 'First to the finish.' : 'Dead heat.'); return; }
@@ -2430,12 +2489,19 @@ registerGame({
   create(api) {
     const LEN = 3600, n = api.n, col = i => api.players[i].color;
     let fences, an, over, endT, winner, t;
+    const runT = [false, false], jmpT = [false, false], sy0 = [null, null];
     return {
+      touch: 'Tap fast to run. Press and drag upward to jump a fence.',
+      pointer(x, y, t, i) {
+        if (t === 'down') { runT[i] = true; sy0[i] = y; }
+        else if (t === 'move' && sy0[i] !== null && sy0[i] - y > 34) { jmpT[i] = true; sy0[i] = null; }
+        else if (t === 'up') sy0[i] = null;
+      },
       reset() { fences = []; for (let x = 520; x < LEN - 200; x += irand(300, 440)) fences.push(x); an = []; for (let i = 0; i < n; i++) an.push({ x: 0, v: 0, jump: 0, cd: 0, stun: 0, passed: 0 }); over = false; endT = 0; winner = -1; t = 0; },
       update(dt) {
         t += dt; if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, 'First across the line.'); return; }
         for (let i = 0; i < n; i++) {
-          const p = an[i], s = api.input(i); p.cd -= dt; p.jump -= dt;
+          const p = an[i], s0 = api.input(i), s = { pa: s0.pa || runT[i], pb: s0.pb || jmpT[i] }; runT[i] = jmpT[i] = false; p.cd -= dt; p.jump -= dt;
           if (p.stun > 0) { p.stun -= dt; p.v *= Math.exp(-4 * dt); }
           else { if (s.pa) p.v = Math.min(430, p.v + 34); if (s.pb && p.cd <= 0 && p.jump <= 0) { p.jump = .55; p.cd = .8; api.beep('select'); } p.v *= Math.exp(-.9 * dt); }
           const px = p.x; p.x += p.v * dt;
@@ -2540,6 +2606,7 @@ registerGame({
     const AX = 90, AY = 86, AW = 780, AH = 470, CR = 22, n = api.n, col = i => api.players[i].color;
     let cars, over, endT, winner, t, sparks, anim, msg;
     return {
+      pointerRaw: true, touch: 'Your car chases your finger or mouse. Keep it close to brake.',
       reset() {
         const sp = [[.2, .25, 0.4], [.8, .75, 3.5], [.8, .25, 2.7], [.2, .75, 0.7]]; cars = []; for (let i = 0; i < n; i++) cars.push({ x: AX + AW * sp[i][0], y: AY + AH * sp[i][1], vx: 0, vy: 0, ang: sp[i][2], hp: 100, alive: true });
         over = false; endT = 0; winner = -1; t = 0; sparks = []; anim = 0; msg = '';
@@ -2550,9 +2617,11 @@ registerGame({
         t += dt;
         for (let i = 0; i < n; i++) {
           const c = cars[i]; if (!c.alive) continue; const s = api.input(i), sp = Math.hypot(c.vx, c.vy);
+          let sx = s.x, go = s.a, br = s.b;
+          if (s.ph) { const ddx = s.px - c.x, ddy = s.py - c.y, dd = Math.hypot(ddx, ddy); if (dd > 34) { let df = Math.atan2(ddy, ddx) - c.ang; while (df > Math.PI) df -= TAU; while (df < -Math.PI) df += TAU; sx = clamp(df * 2.2, -1, 1); go = true; br = false; } else { sx = 0; go = false; br = true; } }
           const hx = Math.cos(c.ang), hy = Math.sin(c.ang), fwd = c.vx * hx + c.vy * hy;
-          c.ang += s.x * 2.7 * dt * clamp(.35 + Math.abs(fwd) / 220, 0, 1) * (fwd < -10 ? -1 : 1);
-          const ax = Math.cos(c.ang), ay = Math.sin(c.ang), acc = s.a ? 400 : s.b ? -300 : 0;
+          c.ang += sx * 2.7 * dt * clamp(.35 + Math.abs(fwd) / 220, 0, 1) * (fwd < -10 ? -1 : 1);
+          const ax = Math.cos(c.ang), ay = Math.sin(c.ang), acc = go ? 400 : br ? -300 : 0;
           c.vx += ax * acc * dt; c.vy += ay * acc * dt;
           const f2 = c.vx * ax + c.vy * ay, lx = c.vx - ax * f2, ly = c.vy - ay * f2, k = Math.exp(-5 * dt); c.vx = ax * f2 + lx * k; c.vy = ay * f2 + ly * k;
           const dr = Math.exp(-.5 * dt); c.vx *= dr; c.vy *= dr; c.x += c.vx * dt; c.y += c.vy * dt;
@@ -2603,6 +2672,8 @@ registerGame({
     function aimTo() { const t = target(); aim.ang = Math.atan2(t[1] - ball.y, t[0] - ball.x); }
     function reset0() { ball = { x: X0 + FW / 2, y: CYF, vx: 0, vy: 0 }; }
     return {
+      touch: 'Press, pull back from the ball and let go to kick. The farther you pull, the harder.',
+      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, ball.x, ball.y); },
       reset(r) { reset0(); turn = r % 2; phase = 'aim'; score = [0, 0]; kicks = 0; over = false; endT = 0; winner = -1; note = ''; noteT = 0; rt = 0; aim.reset(0); aimTo(); api.turn(turn); },
       update(dt) {
         noteT -= dt;
@@ -2744,6 +2815,16 @@ registerGame({
     }
     function fresh() { sel = [{ c: 1, r: 1, lock: false }, { c: 1, r: 1, lock: false }]; phase = 'choose'; t = 0; res = ''; }
     return {
+      pointer(x, y, t, i) {
+        if (t !== 'down' || phase !== 'choose' || over || !sel[i] || sel[i].lock) return;
+        const px = i ? 735 : 30, py = 410;
+        let c = Math.floor((x - (px + 20)) / 50), r = Math.floor((y - (py + 44)) / 40);
+        if (!(c >= 0 && c < 3 && r >= 0 && r < 2 && y >= py + 44)) {
+          if (x < GX || x > GX + GW || y < GY || y > GY + GH) return;
+          c = Math.min(2, Math.floor((x - GX) / (GW / 3))); r = y < GY + GH / 2 ? 0 : 1;
+        }
+        sel[i].c = c; sel[i].r = r; sel[i].lock = true; api.beep('select');
+      },
       reset() { kick = 0; goals = [0, 0]; taken = [0, 0]; marks = [[], []]; over = false; endT = 0; ballT = 0; fresh(); },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(goals[0] > goals[1] ? 0 : 1, `${goals[0]} to ${goals[1]}.`); return; }
@@ -2824,6 +2905,12 @@ registerGame({
       else { g.beginPath(); g.moveTo(x - s * .55, y + s * .6); g.lineTo(x + s * .15, y - s * .6); g.moveTo(x + s * .55, y + s * .6); g.lineTo(x - s * .15, y - s * .6); g.stroke(); D.disc(g, x - s * .5, y + s * .6, s * .17, c); D.disc(g, x + s * .5, y + s * .6, s * .17, c); }
     }
     return {
+      pointer(x, y, t, i) {
+        if (t !== 'down' || phase !== 'pick' || lock[i] || over) return;
+        const cx = i ? 720 : 240; if (Math.abs(x - cx) > 130 || y < 215 || y > 465) return;
+        if (x < cx - 45) pick[i] = (pick[i] + 2) % 3; else if (x > cx + 45) pick[i] = (pick[i] + 1) % 3;
+        else { lock[i] = true; api.beep('select'); }
+      },
       reset() { pick = [0, 0]; lock = [false, false]; pts = [0, 0]; phase = 'pick'; t = 0; out = -2; over = false; },
       update(dt) {
         if (phase === 'pick') {
@@ -2851,7 +2938,7 @@ registerGame({
           D.rr(g, cx - 130, 215, 260, 250, 20); g.fillStyle = '#16293A'; g.fill();
           if (phase === 'reveal') { hand(g, pick[i], cx, 340, 110, (out === i ? col(i) : (out < 0 ? SCR.fg : SCR.dim))); D.text(g, NAMES[pick[i]], cx, 445, 22, SCR.fg); }
           else if (lock[i]) { D.text(g, 'LOCKED', cx, 340, 36, col(i)); }
-          else if (!hide) { hand(g, pick[i], cx, 330, 90, SCR.soft); D.text(g, NAMES[pick[i]], cx, 440, 24, SCR.fg); D.text(g, '<   >', cx, 468 + 12, 20, SCR.dim); }
+          else if (!hide) { hand(g, pick[i], cx, 330, 90, SCR.soft); D.text(g, NAMES[pick[i]], cx, 440, 24, SCR.fg); D.text(g, 'tap left / right to change, tap the hand to lock', cx, 468 + 12, 13, SCR.dim); }
           else D.text(g, 'Choosing', cx, 340, 26, SCR.dim);
         }
         D.text(g, `First to ${TO}`, W / 2, 540, 20, SCR.dim, 'center', 600);
@@ -2873,7 +2960,12 @@ registerGame({
     const PROMPTS = [['A', 'pa'], ['B', 'pb'], ['LEFT', 'pl'], ['RIGHT', 'pr'], ['UP', 'pu'], ['DOWN', 'pd']];
     let ph, t, cur, pts, lockT, winner, flash, endT;
     function nextWait() { ph = 'wait'; t = rand(1, 3); cur = irand(0, PROMPTS.length - 1); lockT = [0, 0]; winner = -1; flash = [0, 0]; }
+    const kp = [-1, -1], padRect = (i, k) => [(i ? 720 : 240) - 135 + (k % 3) * 92, k < 3 ? 432 : 486, 86, 46];
     return {
+      pointer(x, y, t, i) {
+        if (t !== 'down') return;
+        for (let k = 0; k < 6; k++) { const [rx, ry, rw, rh] = padRect(i, k); if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) { kp[i] = k; return; } }
+      },
       reset() { pts = [0, 0]; endT = 0; nextWait(); },
       update(dt) {
         for (let i = 0; i < 2; i++) { lockT[i] = Math.max(0, lockT[i] - dt); flash[i] = Math.max(0, flash[i] - dt); }
@@ -2883,10 +2975,11 @@ registerGame({
         else if (ph === 'result') { t -= dt; if (t <= 0) { if (pts[0] >= TO || pts[1] >= TO) { api.endRound(pts[0] > pts[1] ? 0 : 1, `${pts[0]} to ${pts[1]}.`); ph = 'done'; } else nextWait(); } }
         if (ph === 'wait' || ph === 'go') {
           for (let i = 0; i < 2; i++) {
+            const tp = kp[i]; kp[i] = -1;
             if (lockT[i] > 0) continue; const s = api.input(i);
-            const any = s.pa || s.pb || s.pl || s.pr || s.pu || s.pd; if (!any) continue;
+            const any = s.pa || s.pb || s.pl || s.pr || s.pu || s.pd || tp >= 0; if (!any) continue;
             if (ph === 'wait') { lockT[i] = 1; flash[i] = .4; api.beep('no'); continue; }
-            if (s[PROMPTS[cur][1]]) { winner = i; pts[i]++; ph = 'result'; t = 1.1; api.beep('win'); break; }
+            if (s[PROMPTS[cur][1]] || tp === cur) { winner = i; pts[i]++; ph = 'result'; t = 1.1; api.beep('win'); break; }
             lockT[i] = .9; flash[i] = .4; api.beep('no');
           }
         }
@@ -2899,9 +2992,10 @@ registerGame({
         D.text(g, go ? PROMPTS[cur][0] : '. . .', W / 2, 220, go ? 84 : 60, go ? '#3DDC97' : SCR.soft);
         for (let i = 0; i < 2; i++) {
           const x = i ? 720 : 240, locked = lockT[i] > 0;
-          g.globalAlpha = locked ? .45 : 1; D.rr(g, x - 150, 370, 300, 150, 18); g.fillStyle = col(i); g.fill(); g.globalAlpha = 1;
-          D.text(g, api.players[i].name, x, 408, 26, SCR.bg); D.text(g, pts[i], x, 466, 66, SCR.bg);
-          if (locked) D.text(g, 'FROZEN', x, 504, 16, SCR.bg, 'center', 700);
+          g.globalAlpha = locked ? .45 : 1; D.rr(g, x - 150, 340, 300, 205, 18); g.fillStyle = col(i); g.fill(); g.globalAlpha = 1;
+          D.text(g, api.players[i].name + '  ' + pts[i], x, 378, 30, SCR.bg);
+          if (locked) D.text(g, 'FROZEN', x, 410, 16, SCR.bg, 'center', 700);
+          for (let k = 0; k < 6; k++) { const [rx, ry, rw, rh] = padRect(i, k); g.fillStyle = 'rgba(15,25,35,.22)'; D.rr(g, rx, ry, rw, rh, 10); g.fill(); D.text(g, PROMPTS[k][0], rx + rw / 2, ry + rh / 2 + 6, 17, SCR.bg, 'center', 700); }
         }
       }
     };
@@ -2966,6 +3060,7 @@ registerGame({
     const col = i => api.players[i].color;
     let pos, over, endT, bonus;
     return {
+      tapA: true,
       reset() { pos = 0; over = false; endT = 0; bonus = [0, 0]; },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(pos < 0 ? 0 : 1, 'Pulled across the line.'); return; }
@@ -3015,6 +3110,7 @@ registerGame({
       else { b.hp -= HIT; b.st = 'stun'; b.t = .38; b.x += face(i) * 70; sparks.push({ x: b.x, y: GY - 90, t: .35, c: col(i) }); api.beep('hit'); if (b.hp <= 0) { b.hp = 0; b.dead = true; api.beep('die'); } }
     }
     return {
+      dragAxes: 'x', drag: i => ({ x: f[i].x, y: 0 }),
       reset() { f = [{ x: 330, hp: 100, st: 'idle', t: 0, dead: false }, { x: 630, hp: 100, st: 'idle', t: 0, dead: false }]; over = false; endT = 0; winner = -1; sparks = []; },
       update(dt) {
         sparks = sparks.filter(s => (s.t -= dt) > 0);
@@ -3075,6 +3171,7 @@ registerGame({
     let hip, balls, spawned, score, sp, over, endT;
     const head = (i) => ({ x: i ? W - 60 - hip[i].e * 330 : 60 + hip[i].e * 330, y: hip[i].y });
     return {
+      dragAxes: 'y', drag: i => ({ x: 0, y: hip[i].y }),
       reset() {
         hip = [{ y: 320, e: 0, st: 'idle' }, { y: 320, e: 0, st: 'idle' }]; balls = []; spawned = 0; score = [0, 0]; sp = .5; over = false; endT = 0;
       },
@@ -3164,6 +3261,7 @@ registerGame({
     const curveStart = (lane, k) => { const r = R[lane], L = LEN(r); return (k === 1 ? HS : 3 * HS + Math.PI * r) / L; };
     let car, over, endT, winner;
     return {
+      tapA: true, touch: 'Press and hold your side to speed up. Right-click or a second finger brakes.',
       reset() { car = [0, 1].map(() => ({ p: 0, v: 0, over: 0, out: 0 })); over = false; endT = 0; winner = -1; },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${LAPS} laps done.`); return; }
@@ -3215,6 +3313,8 @@ registerGame({
     const col = i => api.players[i].color, PX = [80, 500], PW = 380, TOP = 70, BOT = 580, CARY = 480, LW = PW / 3;
     let rows, dist, car, over, endT, winner;
     return {
+      touch: 'Click or tap the lane you want on your road.',
+      pointer(x, y, t, i) { if (!car || !car[i] || t === 'up') return; if (x < PX[i] - 40 || x > PX[i] + PW + 40) return; car[i].lane = clamp(Math.floor((x - PX[i]) / LW), 0, 2); },
       reset() {
         rows = []; let z = 520;
         for (let k = 0; k < 400; k++) {
@@ -3271,6 +3371,7 @@ registerGame({
     let obs, dist, run, over, endT, winner;
     const yF = i => SY[i] + SH - 22, yC = i => SY[i] + 22;
     return {
+      tapA: true, touch: 'Click or tap your half to flip gravity.',
       reset() {
         obs = []; let d = 760; for (let k = 0; k < 200; k++) { obs.push({ d, side: irand(0, 1) }); d += irand(300, 480); }
         dist = 0; run = [0, 1].map(i => ({ y: yF(i) - 14, vy: 0, g: 1, alive: true, t: 0 })); over = false; endT = 0; winner = -1;
@@ -3344,8 +3445,26 @@ registerGame({
       }
       for (let k = 0; k < 46; k++) { const r = irand(0, ROWS - 1), c = irand(0, COLS - 1); if (Rng.next() < .5) { if (c < COLS - 1) wr[r][c] = false; } else if (r < ROWS - 1) wd[r][c] = false; }
     }
+    let goal = [null, null];
+    function stepTo(i) {
+      const g0 = goal[i]; if (!g0) return null; const [r0, c0] = pos[i]; if (r0 === g0[0] && c0 === g0[1]) { goal[i] = null; return null; }
+      const dist = Array.from({ length: ROWS }, () => Array(COLS).fill(-1)); const q = [[g0[0], g0[1]]]; dist[g0[0]][g0[1]] = 0;
+      for (let h = 0; h < q.length; h++) {
+        const [r, c] = q[h], d = dist[r][c];
+        const tryN = (nr, nc, open) => { if (open && dist[nr][nc] < 0) { dist[nr][nc] = d + 1; q.push([nr, nc]); } };
+        if (c + 1 < COLS) tryN(r, c + 1, !wr[r][c]); if (c - 1 >= 0) tryN(r, c - 1, !wr[r][c - 1]);
+        if (r + 1 < ROWS) tryN(r + 1, c, !wd[r][c]); if (r - 1 >= 0) tryN(r - 1, c, !wd[r - 1][c]);
+      }
+      const d0 = dist[r0][c0]; if (d0 <= 0) return null;
+      const opts = [[0, 1, c0 + 1 < COLS && !wr[r0][c0]], [0, -1, c0 - 1 >= 0 && !wr[r0][c0 - 1]], [1, 0, r0 + 1 < ROWS && !wd[r0][c0]], [-1, 0, r0 - 1 >= 0 && !wd[r0 - 1][c0]]];
+      for (const [dr, dc, ok] of opts) if (ok && dist[r0 + dr][c0 + dc] === d0 - 1) return [dr, dc];
+      return null;
+    }
     return {
+      touch: 'Click or drag to a tile and your runner paints its way there.',
+      pointer(x, y, t, i) { const c = Math.floor((x - X0) / CS), r = Math.floor((y - Y0) / CS); if (c < 0 || c >= COLS || r < 0 || r >= ROWS || !pos) return; goal[i] = [r, c]; },
       reset() {
+        goal = [null, null];
         gen(); own = Array.from({ length: ROWS }, () => Array(COLS).fill(-1)); pos = [[0, 0], [ROWS - 1, COLS - 1]]; cd = [0, 0]; tl = TOTAL; over = false; endT = 0;
         own[0][0] = 0; own[ROWS - 1][COLS - 1] = 1; count();
       },
@@ -3354,7 +3473,7 @@ registerGame({
         tl -= dt; if (tl <= 0) { over = true; endT = .9; return; }
         for (let i = 0; i < 2; i++) {
           cd[i] -= dt; if (cd[i] > 0) continue; const s = api.input(i); let dr = 0, dc = 0;
-          if (Math.abs(s.x) > .5 && Math.abs(s.x) >= Math.abs(s.y)) dc = Math.sign(s.x); else if (Math.abs(s.y) > .5) dr = Math.sign(s.y); else continue;
+          if (Math.abs(s.x) > .5 && Math.abs(s.x) >= Math.abs(s.y)) { dc = Math.sign(s.x); goal[i] = null; } else if (Math.abs(s.y) > .5) { dr = Math.sign(s.y); goal[i] = null; } else { const st = stepTo(i); if (!st) continue; dr = st[0]; dc = st[1]; }
           const [r, c] = pos[i]; let ok = false;
           if (dc === 1) ok = c + 1 < COLS && !wr[r][c]; else if (dc === -1) ok = c - 1 >= 0 && !wr[r][c - 1]; else if (dr === 1) ok = r + 1 < ROWS && !wd[r][c]; else ok = r - 1 >= 0 && !wd[r - 1][c];
           cd[i] = ok ? .085 : .05; if (!ok) continue;
@@ -3397,16 +3516,23 @@ registerGame({
       ph = 'play'; winner = -1; lockT = [0, 0];
     }
     const symAt = idx => idx < 6 ? A[idx] : B[idx - 6];
+    const tap = [-1, -1];
     return {
+      touch: 'Click or tap the symbol you think both cards share.',
+      pointer(x, y, t, i) {
+        if (t !== 'down' || ph !== 'play') return;
+        for (let ci = 0; ci < 2; ci++) for (let k = 0; k < 6; k++) { const [dx, dy] = POS[k]; if (Math.hypot(x - CXS[ci] - dx, y - CY - dy) < 50) { tap[i] = ci * 6 + k; return; } }
+      },
       reset() { pts = [0, 0]; cur = [0, 6]; flash = [0, 0]; t = 0; deal(); },
       update(dt) {
         for (let i = 0; i < 2; i++) { lockT[i] = Math.max(0, lockT[i] - dt); flash[i] = Math.max(0, flash[i] - dt); }
         if (ph === 'result') { t -= dt; if (t <= 0) { if (pts[0] >= TO || pts[1] >= TO) { ph = 'done'; api.endRound(pts[0] > pts[1] ? 0 : 1, `${pts[0]} to ${pts[1]}.`); } else deal(); } return; }
         if (ph !== 'play') return;
         for (let i = 0; i < 2; i++) {
-          const s = api.input(i); if (lockT[i] > 0) continue; let c = cur[i], side = c < 6 ? 0 : 1, k = c % 6;
+          const s = api.input(i), tp = tap[i]; tap[i] = -1; if (lockT[i] > 0) continue; let c = cur[i], side = c < 6 ? 0 : 1, k = c % 6;
           if (s.pl) k = (k + 5) % 6; if (s.pr) k = (k + 1) % 6; if (s.pu || s.pd) side = 1 - side; cur[i] = side * 6 + k;
-          if (s.pa) {
+          if (tp >= 0) cur[i] = tp;
+          if (s.pa || tp >= 0) {
             if (symAt(cur[i]) === shared) { winner = i; pts[i]++; ph = 'result'; t = 1.2; api.beep('win'); break; }
             lockT[i] = 1; flash[i] = .4; api.beep('no');
           }
@@ -3646,7 +3772,7 @@ registerGame({
 registerGame({
   id: 'snakes', title: 'Snakes & Ladders', blurb: 'Roll, climb, slide. First to square 100 on an exact roll.',
   kind: 'turns', min: 2, max: 2, color: 3,
-  help: 'Press A to roll. Ladders carry you up, snakes drop you down. You need the exact number to land on 100. A six gives another roll.',
+  help: 'Tap or press A to roll. Ladders carry you up, snakes drop you down. You need the exact number to land on 100. A six gives another roll.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><path d="M50 108L90 14M72 108L112 14M58 88l22 4M66 66l22 4M74 44l22 4"/><path d="M140 20c-26 12 18 24-8 38s20 26-4 44" stroke-width="7"/><circle cx="140" cy="20" r="6" fill="#0F1923"/></svg>`;
   },
@@ -3658,11 +3784,14 @@ registerGame({
       if (n <= 0) return [X0 - 26, Y0 + 9 * CS + CS / 2]; const i = n - 1, row = Math.floor(i / 10), c = row % 2 === 0 ? i % 10 : 9 - (i % 10);
       return [X0 + c * CS + CS / 2, Y0 + (9 - row) * CS + CS / 2];
     };
+    let want = false;
     return {
-      reset(r) { pos = [0, 0]; turn = r % 2; phase = 'roll'; t = 0; die = 1; steps = 0; anim = 0; over = false; endT = 0; winner = -1; toSq = 0; again = false; api.turn(turn); },
+      touch: 'Click or tap anywhere to roll the die.',
+      pointer(x, y, t) { if (t === 'down') want = true; },
+      reset(r) { want = false; pos = [0, 0]; turn = r % 2; phase = 'roll'; t = 0; die = 1; steps = 0; anim = 0; over = false; endT = 0; winner = -1; toSq = 0; again = false; api.turn(turn); },
       update(dt) {
-        anim += dt;
-        if (phase === 'roll') { const s = api.input(turn); if (s.pa) { die = irand(1, 6); phase = 'rolling'; t = .6; api.beep('select'); } }
+        anim += dt; if (phase !== 'roll') want = false;
+        if (phase === 'roll') { const s = api.input(turn); if (s.pa || want) { want = false; die = irand(1, 6); phase = 'rolling'; t = .6; api.beep('select'); } }
         else if (phase === 'rolling') { t -= dt; if (t <= 0) { steps = pos[turn] + die <= 100 ? die : 0; phase = steps ? 'move' : 'after'; t = .12; if (!steps) t = .5; } }
         else if (phase === 'move') {
           t -= dt; if (t <= 0) { pos[turn]++; steps--; api.beep('wall'); t = .13; if (steps === 0) { phase = 'land'; t = .35; } }
@@ -3709,7 +3838,7 @@ registerGame({
         const face = phase === 'rolling' ? 1 + (Math.floor(anim * 24) % 6) : die;
         const P = { 1: [[0, 0]], 2: [[-1, -1], [1, 1]], 3: [[-1, -1], [0, 0], [1, 1]], 4: [[-1, -1], [1, -1], [-1, 1], [1, 1]], 5: [[-1, -1], [1, -1], [0, 0], [-1, 1], [1, 1]], 6: [[-1, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [1, 1]] };
         P[face].forEach(([a, c]) => D.disc(g, dx + a * 20, dy + c * 20, 7, SCR.bg));
-        D.text(g, phase === 'roll' ? 'Press A to roll' : phase === 'after' && die === 6 ? 'A six. Roll again' : '', dx, dy + 74, 16, SCR.dim, 'center', 600);
+        D.text(g, phase === 'roll' ? 'Tap to roll' : phase === 'after' && die === 6 ? 'A six. Roll again' : '', dx, dy + 74, 16, SCR.dim, 'center', 600);
       }
     };
   }
@@ -3719,7 +3848,7 @@ registerGame({
 registerGame({
   id: 'shutbox', title: 'Shut the Box', blurb: 'Roll the dice, then close tiles that add up to your roll. Lowest leftover wins.',
   kind: 'turns', min: 2, max: 2, color: 2,
-  help: 'A rolls. Then move along the tiles with left and right and press A to pick tiles that add up to the roll. B clears your picks. When you cannot make the roll, your turn ends and open tiles count against you.',
+  help: 'Tap or press A to roll. Then tap tiles, or move along the tiles with left and right and press A to pick tiles that add up to the roll. B clears your picks. When you cannot make the roll, your turn ends and open tiles count against you.',
   icon() {
     let s = ''; for (let i = 0; i < 9; i++) s += `<rect x="${16 + i * 18}" y="${i % 3 === 0 ? 56 : 30}" width="14" height="${i % 3 === 0 ? 40 : 66}" rx="2" fill="${i % 3 === 0 ? 'none' : '#0F1923'}" stroke="#0F1923" stroke-width="3"/>`;
     return `<svg viewBox="0 0 200 125">${s}</svg>`;
@@ -3735,16 +3864,20 @@ registerGame({
       if (done[0] && done[1]) { phase = 'over'; t = 1.3; return; }
       turn = 1 - turn; phase = 'roll'; api.turn(turn);
     }
+    let tap = null;
     return {
+      touch: 'Tap to roll the dice, tap tiles that add up to the roll. Tap the dice to clear.',
+      pointer(x, y, t) { if (t === 'down') tap = [x, y]; },
       reset(r) {
+        tap = null;
         open = [0, 1].map(() => { const o = []; for (let n = 0; n <= 9; n++) o[n] = n > 0; return o; });
         turn = r % 2; phase = 'roll'; t = 0; dice = [1, 1]; total = 0; picks = new Set(); cur = 1; scores = [0, 0]; done = [false, false]; over = false; endT = 0; anim = 0; api.turn(turn);
       },
       update(dt) {
-        anim += dt;
+        anim += dt; const tp = tap; tap = null;
         if (phase === 'roll') {
           const s = api.input(turn);
-          if (s.pa) {
+          if (s.pa || tp) {
             const one = !open[turn][7] && !open[turn][8] && !open[turn][9];
             dice = [irand(1, 6), one ? 0 : irand(1, 6)]; total = dice[0] + dice[1]; phase = 'rolling'; t = .7; api.beep('select');
           }
@@ -3755,9 +3888,15 @@ registerGame({
           }
         } else if (phase === 'pick') {
           const s = api.input(turn), a = openNums(turn), idx = a.indexOf(cur);
+          let press = s.pa;
           if (s.pl) cur = a[Math.max(0, idx - 1)]; if (s.pr) cur = a[Math.min(a.length - 1, idx + 1)];
           if (s.pb) picks = new Set();
-          if (s.pa) {
+          if (tp) {
+            const y0 = (turn ? 400 : 120) - 20;
+            if (tp[1] >= y0 && tp[1] <= y0 + 110) { for (const n of a) { const x = 130 + (n - 1) * 84; if (tp[0] >= x && tp[0] <= x + 72) { cur = n; press = true; } } }
+            else if (tp[1] > 220 && tp[1] < 320) picks = new Set();
+          }
+          if (press) {
             if (picks.has(cur)) picks.delete(cur); else picks.add(cur); api.beep('select');
             const sp = sumPicks();
             if (sp === total) { phase = 'close'; t = .5; api.beep('place'); } else if (sp > total) { picks = new Set(); api.beep('no'); }
@@ -3789,7 +3928,7 @@ registerGame({
           const P = { 1: [[0, 0]], 2: [[-1, -1], [1, 1]], 3: [[-1, -1], [0, 0], [1, 1]], 4: [[-1, -1], [1, -1], [-1, 1], [1, 1]], 5: [[-1, -1], [1, -1], [0, 0], [-1, 1], [1, 1]], 6: [[-1, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [1, 1]] };
           P[face].forEach(([a, c]) => D.disc(g, x + a * 15, cy + c * 15, 5.5, SCR.bg));
         }
-        const msg = phase === 'roll' ? 'Press A to roll' : phase === 'bust' ? 'No tiles fit. Turn over' : phase === 'pick' ? `Roll ${total}   Picked ${sumPicks()}` : phase === 'close' ? 'Closed' : '';
+        const msg = phase === 'roll' ? 'Tap to roll' : phase === 'bust' ? 'No tiles fit. Turn over' : phase === 'pick' ? `Roll ${total}   Picked ${sumPicks()}` : phase === 'close' ? 'Closed' : '';
         D.text(g, msg, W / 2, 330, 22, SCR.dim, 'center', 600);
       }
     };
@@ -3800,7 +3939,7 @@ registerGame({
 registerGame({
   id: 'yazy', title: 'Yazy', blurb: 'Five dice, three rolls a turn, thirteen boxes to fill. The classic dice game.',
   kind: 'turns', min: 2, max: 2, color: 0,
-  help: 'A rolls to start. Then left/right picks a die and A holds it, B rolls the rest again (up to three rolls). Press down to choose a box, A scores it. Up or B returns to the dice.',
+  help: 'Tap or press A to roll. Then left/right picks a die and A holds it, B rolls the rest again (up to three rolls). Press down to choose a box, A scores it. Up or B returns to the dice.',
   icon() {
     let s = ''; const P = [[[0, 0]], [[-1, -1], [1, 1]], [[-1, -1], [0, 0], [1, 1]]];
     [[28, 20, 0], [76, 44, 1], [122, 26, 2], [60, 78, 1], [112, 80, 0]].forEach(([x, y, f]) => { s += `<rect x="${x}" y="${y}" width="40" height="40" rx="8" fill="none" stroke="#0F1923" stroke-width="5"/>`; P[f].forEach(([a, b]) => { s += `<circle cx="${x + 20 + a * 9}" cy="${y + 20 + b * 9}" r="3.8" fill="#0F1923"/>`; }); });
@@ -3824,7 +3963,22 @@ registerGame({
     function startRoll() {
       pending = dice.map((v, i) => held[i] && rolls > 0 ? v : irand(1, 6)); rolls++; phase = 'rolling'; t = .55; api.beep('select');
     }
+    const TX = 230, C0 = 600, C1 = 730, Y = 192, RH = 24;
+    function scoreCat() {
+      sc[turn][ccur] = score(ccur, dice); api.beep(sc[turn][ccur] ? 'place' : 'no'); filled++;
+      held = Array(5).fill(false); rolls = 0;
+      if (filled === 26) { phase = 'over'; t = 1.3; } else { turn = 1 - turn; phase = 'roll'; api.turn(turn); }
+    }
     return {
+      touch: 'Tap to roll, tap dice to hold them, tap Roll again, tap a box to score it.',
+      pointer(x, y, t) {
+        if (over) return;
+        if (phase === 'roll') { if (t === 'down') startRoll(); return; }
+        if (phase !== 'choose') return;
+        for (let i = 0; i < 5; i++) if (Math.abs(x - (W / 2 + (i - 2) * 92)) <= 34 && Math.abs(y - 104) <= 34) { mode = 'dice'; dcur = i; if (t === 'down' && rolls < 3) { held[i] = !held[i]; api.beep('select'); } return; }
+        if (rolls < 3 && x > W / 2 - 110 && x < W / 2 + 110 && y > 146 && y < 190) { if (t === 'down') startRoll(); return; }
+        for (let k = 0; k < 13; k++) { const yy = Y + k * RH + 8 + (k > 5 ? 22 : 0); if (x >= TX - 12 && x <= C1 + 50 && Math.abs(y - yy) <= 12 && sc[turn][k] === null) { mode = 'cat'; ccur = k; if (t === 'down') scoreCat(); return; } }
+      },
       reset(r) {
         sc = [Array(13).fill(null), Array(13).fill(null)]; turn = r % 2; rolls = 0; dice = [1, 2, 3, 4, 5]; held = Array(5).fill(false); phase = 'roll'; t = 0; mode = 'dice'; dcur = 0; ccur = 0; over = false; endT = 0; anim = 0; filled = 0; api.turn(turn);
       },
@@ -3844,11 +3998,7 @@ registerGame({
             if (s.pd) ccur = o[Math.min(o.length - 1, i + 1)];
             if (s.pu) { if (i === 0) mode = 'dice'; else ccur = o[i - 1]; }
             if (s.pb) mode = 'dice';
-            if (s.pa) {
-              sc[turn][ccur] = score(ccur, dice); api.beep(sc[turn][ccur] ? 'place' : 'no'); filled++;
-              held = Array(5).fill(false); rolls = 0;
-              if (filled === 26) { phase = 'over'; t = 1.3; } else { turn = 1 - turn; phase = 'roll'; api.turn(turn); }
-            }
+            if (s.pa) scoreCat();
           }
         } else if (phase === 'over') { t -= dt; if (t <= 0 && !over) { over = true; const a = total(sc[0]), b = total(sc[1]); api.endRound(a === b ? -1 : a > b ? 0 : 1, `${a} to ${b}.`); } }
       },
@@ -3862,8 +4012,8 @@ registerGame({
           if (held[i] && phase !== 'roll') D.text(g, 'HELD', x, y + 50, 12, col(turn), 'center', 700);
           if (phase === 'choose' && mode === 'dice' && dcur === i) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([8, 6]); D.rr(g, x - 38, y - 38, 76, 76, 15); g.stroke(); g.setLineDash([]); }
         }
-        if (phase === 'roll') D.text(g, 'Press A to roll', W / 2, 168, 20, SCR.dim, 'center', 600);
-        const TX = 230, C0 = 600, C1 = 730, Y = 192, RH = 24;
+        if (phase === 'roll') D.text(g, 'Tap to roll', W / 2, 168, 20, SCR.dim, 'center', 600);
+        else if (phase === 'choose' && rolls < 3) { g.fillStyle = '#2C465E'; D.rr(g, W / 2 - 110, 150, 220, 36, 18); g.fill(); D.text(g, 'Roll again (' + (3 - rolls) + ' left)', W / 2, 174, 16, SCR.fg, 'center', 700); }
         D.text(g, api.players[0].name, C0, Y - 18, 16, col(0)); D.text(g, api.players[1].name, C1, Y - 18, 16, col(1));
         CATS.forEach((n, k) => {
           const y = Y + k * RH + 8 + (k > 5 ? 22 : 0);
@@ -3880,7 +4030,7 @@ registerGame({
         for (let i = 0; i < 2; i++) D.text(g, `${upper(sc[i])}/63${upper(sc[i]) >= 63 ? '  +35' : ''}`, i ? C1 : C0, yb, 14, SCR.dim, 'center', 600);
         const yt = Y + 13 * RH + 8 + 22 + 10;
         D.text(g, 'Total', TX, yt, 22, SCR.fg, 'left'); for (let i = 0; i < 2; i++) D.text(g, total(sc[i]), i ? C1 : C0, yt, 24, col(i));
-        if (phase === 'choose') D.text(g, mode === 'dice' ? (rolls < 3 ? 'A holds a die · B rolls the rest · Down picks a box' : 'No rolls left · Down picks a box') : 'A scores the box · Up or B back to dice', W / 2, 578, 15, SCR.dim, 'center', 600);
+        if (phase === 'choose') D.text(g, mode === 'dice' ? (rolls < 3 ? 'Tap dice to hold them, tap Roll again, or tap a box to score' : 'No rolls left. Tap a box to score') : 'Tap a box to score it', W / 2, 578, 15, SCR.dim, 'center', 600);
       }
     };
   }
@@ -3892,9 +4042,17 @@ registerGame({
 
 /* shared: wrap an angle control + power charge. Returns a small aimer object */
 function makeAimer() {
-  return { ang: 0, pow: 0, was: false, reset(a) { this.ang = a; this.pow = 0; this.was = false; },
+  return { ang: 0, pow: 0, was: false, pdrag: false, ppow: 0, pf: -1, reset(a) { this.ang = a; this.pow = 0; this.was = false; this.pdrag = false; this.pf = -1; },
+    /* mouse / touch: press, pull back from the ball like a slingshot, release to shoot */
+    ptr(t, x, y, bx, by) {
+      if (t === 'down') this.pdrag = true;
+      if (this.pdrag && (t === 'down' || t === 'move')) { const dx = bx - x, dy = by - y, d = Math.hypot(dx, dy); if (d > 6) this.ang = Math.atan2(dy, dx); this.ppow = clamp((d - 10) / 170, 0, 1); this.pow = this.ppow; }
+      if (t === 'up' && this.pdrag) { this.pdrag = false; if (this.ppow > .05) this.pf = this.ppow; this.pow = 0; this.ppow = 0; }
+    },
     /* returns power (0..1) at the moment A is released, else -1 */
     step(s, dt, rate) {
+      if (this.pf >= 0) { const f = this.pf; this.pf = -1; this.was = false; return f; }
+      if (this.pdrag) { this.was = false; return -1; }
       this.ang += s.x * dt * (s.b ? rate * .25 : rate);
       let fire = -1;
       if (s.a) this.pow = Math.min(1, this.pow + dt * .85);
@@ -3967,6 +4125,8 @@ registerGame({
     }
     function aimAtNearest() { const c = balls[0]; let best = null, bd = 1e9; for (const b of balls) if (b.alive && b.id !== 0) { const d = Math.hypot(b.x - c.x, b.y - c.y); if (d < bd) { bd = d; best = b; } } if (best) aim.ang = Math.atan2(best.y - c.y, best.x - c.x); }
     return {
+      touch: 'Press, pull back from the cue ball and let go to shoot. The farther you pull, the harder.',
+      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, balls[0].x, balls[0].y); },
       reset() {
         balls = [ball(0, X0 + TW * .25, Y0 + TH / 2)]; const ids = shuffle([1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]); const rack = []; let k = 0;
         for (let r = 0; r < 5; r++) for (let i = 0; i <= r; i++) { const cx = r === 2 && i === 1; rack.push(cx ? 8 : ids[k++]); }
@@ -4025,11 +4185,13 @@ registerGame({
       { par: 4, tee: [170, 470], hole: [790, 170], walls: [[300, 300, 40, 230], [520, 110, 40, 260], [680, 230, 90, 28]] }
     ];
     let hi, ball, strokes, done, turn, phase, total, aim = makeAimer(), over, endT, t, bannerT, winner, sink;
-    const H = () => HOLES[hi];
+    const H = () => HOLES[Math.min(hi, HOLES.length - 1)];
     function startHole() { const t0 = H().tee; ball = [{ x: t0[0], y: t0[1], vx: 0, vy: 0 }, { x: t0[0], y: t0[1], vx: 0, vy: 0 }]; strokes = [0, 0]; done = [false, false]; phase = 'aim'; aim.reset(0); aimAtHole(); api.turn(turn); }
     function aimAtHole() { aim.ang = Math.atan2(H().hole[1] - ball[turn].y, H().hole[0] - ball[turn].x); }
     function nextTurn() { if (done[0] && done[1]) { phase = 'banner'; bannerT = 1.4; total[0] += strokes[0]; total[1] += strokes[1]; return; } turn = done[1 - turn] ? turn : 1 - turn; api.turn(turn); phase = 'aim'; aimAtHole(); }
     return {
+      touch: 'Press, pull back from the ball and let go to putt. The farther you pull, the harder.',
+      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, ball[turn].x, ball[turn].y); },
       reset(r) { hi = 0; total = [0, 0]; turn = r % 2; over = false; endT = 0; t = 0; winner = -1; startHole(); },
       update(dt) {
         t += dt;
@@ -4091,6 +4253,7 @@ registerGame({
     let cups, turn, phase, t, lockX, lockY, throwT, hitIdx, over, endT, winner, thrown, msg, flash;
     const sweepX = () => 480 + 190 * Math.sin(t * (1.9 + thrown[turn] * .06)), sweepY = () => 190 - 100 * Math.cos(t * (2.3 + thrown[turn] * .07));
     return {
+      tapA: true, touch: 'Click or tap to stop each meter.',
       reset(r) { cups = [Array(6).fill(true), Array(6).fill(true)]; turn = r % 2; phase = 'x'; t = 0; thrown = [0, 0]; over = false; endT = 0; winner = -1; msg = ''; flash = 0; api.turn(turn); },
       update(dt) {
         t += dt; flash -= dt;
@@ -4134,7 +4297,7 @@ registerGame({
           const x = i ? 880 : 80; D.text(g, api.players[i].name, x, 150, 18, col(i)); D.text(g, cups[i].filter(Boolean).length + ' cups', x, 180, 22, SCR.fg);
           for (let k = 0; k < 6; k++) D.disc(g, x - 30 + k * 12, 210, 4.5, cups[i][k] ? col(i) : '#223548');
         }
-        D.text(g, phase === 'x' ? 'Press A to stop the sweep' : phase === 'y' ? 'Press A to set the distance' : '', W / 2, 536, 20, SCR.dim, 'center', 600);
+        D.text(g, phase === 'x' ? 'Tap to stop the sweep' : phase === 'y' ? 'Tap to set the distance' : '', W / 2, 536, 20, SCR.dim, 'center', 600);
       }
     };
   }
@@ -4148,19 +4311,25 @@ registerGame({
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="86" cy="62" r="48" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="86" cy="62" r="30" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="86" cy="62" r="12" fill="#0F1923"/><path d="M96 52l86-34M170 12l12 6-6 12" fill="none" stroke="#0F1923" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`; },
   create(api) {
     const TX = 480, TY = 270, RR = 17, col = i => api.players[i].color;
-    let shots, turn, ox, oy, t, breath, wind, phase, pt, over, endT, winner, last, ph;
+    let shots, turn, ox, oy, t, breath, wind, phase, pt, over, endT, winner, last, ph, shootNow = false;
     const total = i => shots[i].reduce((a, s) => a + s.pts, 0);
     const sway = () => { const k = 1; return [Math.sin(t * 1.7 + ph) * 46 + Math.sin(t * 3.3 + ph * 2) * 20, Math.cos(t * 1.3 + ph * 1.5) * 38 + Math.sin(t * 2.9) * 16].map(v => v * k); };
-    function nextArrow() { wind = [irand(-40, 40), irand(-24, 24)]; t = 0; ph = irand(0, 600) / 100; ox = oy = 0; breath = 1; }
+    function nextArrow() { shootNow = false; wind = [irand(-40, 40), irand(-24, 24)]; t = 0; ph = irand(0, 600) / 100; ox = oy = 0; breath = 1; }
     return {
+      touch: 'Move to aim, click or lift your finger to loose the arrow. Right-click or a second finger holds your breath.',
+      pointer(x, y, t) {
+        if (phase !== 'aim' || over) return;
+        if (t !== 'up') { ox = clamp(x - TX, -150, 150); oy = clamp(y - TY, -150, 150); } else shootNow = true;
+      },
       reset(r) { shots = [[], []]; turn = r % 2; phase = 'aim'; pt = 0; over = false; endT = 0; winner = -1; last = null; nextArrow(); api.turn(turn); },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${total(0)} points to ${total(1)}.`); return; }
         if (phase === 'aim') {
           const s = api.input(turn); t += dt;
           ox = clamp(ox + s.x * 130 * dt, -150, 150); oy = clamp(oy + s.y * 130 * dt, -150, 150);
+          const fireNow = shootNow; shootNow = false;
           if (s.b && breath > 0) breath = Math.max(0, breath - dt / 2.6); else breath = Math.min(1, breath + dt / 7);
-          if (s.pa) {
+          if (s.pa || fireNow) {
             const sw = sway(), k = s.b && breath > 0 ? .3 : 1, x = TX + ox + sw[0] * k + wind[0], y = TY + oy + sw[1] * k + wind[1] + 14, jx = irand(-4, 4), jy = irand(-4, 4);
             const px = x + jx, py = y + jy, d = Math.hypot(px - TX, py - TY), pts = d < RR * 10 ? 10 - Math.floor(d / RR) : 0;
             last = { x: px, y: py, pts, p: turn }; shots[turn].push(last); api.beep(pts >= 9 ? 'win' : pts ? 'place' : 'no'); phase = 'res'; pt = 1;
@@ -4205,6 +4374,8 @@ registerGame({
     const pts = p => { const d = Math.hypot(p.x - CX, p.y - CY); for (const [r, v] of RING) if (d < r + PR * .6) return v; return 0; };
     const total = i => pucks.filter(p => p.alive && p.o === i).reduce((a, p) => a + pts(p), 0);
     return {
+      touch: 'Press, pull back from the launch spot and let go to fling the puck.',
+      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, SX, SY); },
       reset(r) { pucks = []; turn = r % 2; count = [0, 0]; phase = 'aim'; aim.reset(-Math.PI / 2); over = false; endT = 0; winner = -1; rollT = 0; note = ''; noteT = 0; api.turn(turn); },
       update(dt) {
         noteT -= dt;
@@ -4264,6 +4435,7 @@ registerGame({
     const speed = () => 1.1 + Math.min(tower.length, 25) * .06;
     function curX() { return tri(t * speed(), FL, FR - top().w); }
     return {
+      tapA: true, touch: 'Click or tap to drop the block.',
       reset(r) { tower = [{ x: 480 - 130, w: 260, o: -1 }]; turn = r % 2; t = 0; falls = []; over = false; endT = 0; winner = -1; perfect = 0; note = ''; noteT = 0; cam = 0; api.turn(turn); },
       update(dt) {
         noteT -= dt; falls.forEach(f => { f.vy += 1400 * dt; f.y += f.vy * dt; }); falls = falls.filter(f => f.y < 900);
@@ -4290,7 +4462,7 @@ registerGame({
         if (!over) { const y = GY - (tower.length + 1) * BH + cam, tp = top(); g.fillStyle = col(turn); g.fillRect(curX(), y, tp.w, BH - 2); g.fillStyle = 'rgba(255,255,255,.2)'; g.fillRect(curX(), y, tp.w, 5); }
         D.text(g, tower.length - 1, 110, 120, 70, SCR.fg); D.text(g, 'blocks', 110, 164, 16, SCR.dim, 'center', 600);
         if (noteT > 0) D.text(g, note, W - 120, 120, 26, '#FFC933');
-        if (!over) D.text(g, 'Press A to drop', W / 2, 572, 18, SCR.dim, 'center', 600);
+        if (!over) D.text(g, 'Click or tap to drop', W / 2, 572, 18, SCR.dim, 'center', 600);
       }
     };
   }
@@ -4329,6 +4501,7 @@ registerGame({
       if (gone.size) P.f = f.filter(b => !gone.has(b)).concat(add);
     }
     return {
+
       dragAxes: 'x', dragFire: 'release', drag: i => ({ x: pl[i].x, y: 0 }),
       reset() {
         pl = [0, 1].map(i => ({ f: [], x: jx(i) + JW / 2, cd: .4, next: irand(0, 2), score: 0, warn: 0 }));
@@ -4492,6 +4665,7 @@ registerGame({
     const CX = 480, CY = 310, AR = 250, TR = 24, n = api.n, col = i => api.players[i].color;
     let tops, over, endT, winner, t, msg, anim;
     return {
+      dragAxes: 'xy', drag: i => tops[i].alive ? tops[i] : null, touch: 'Move your finger or mouse and your top chases it. Click or press for a speed burst.',
       reset() {
         tops = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; tops.push({ x: CX + Math.cos(a) * 160, y: CY + Math.sin(a) * 160, vx: 0, vy: 0, spin: 1, cd: 0, alive: true, fall: 0 }); }
         over = false; endT = 0; winner = -1; t = 0; msg = ''; anim = 0;
@@ -4801,18 +4975,23 @@ registerGame({
     let start, st, over, endT, winner, t, moves;
     const solved = pegs => pegs.every(p => p.length === 0 || (p.length === CAP && p.every(v => v === p[0])));
     const mk = () => ({ pegs: start.map(p => p.slice()), cur: 0, held: -1, from: -1, moves: 0, fin: false, flash: 0 });
+    const tap = [-1, -1];
     return {
+      touch: 'Tap a bolt to lift its top nut, tap another bolt to drop it.',
+      pointer(x, y, t, i) { if (t !== 'down') return; const x0 = i ? 510 : 50; if (x < x0 || x > x0 + 400 || y < 140 || y > 540) return; tap[i] = Math.min(NP - 1, Math.floor((x - x0) / (400 / NP))); },
       reset() {
+        tap[0] = tap[1] = -1;
         let nuts; do { nuts = []; for (let c = 0; c < NC; c++) for (let k = 0; k < CAP; k++) nuts.push(c); nuts = shuffle(nuts); start = []; for (let p = 0; p < NP; p++) start.push(p < NC ? nuts.slice(p * CAP, p * CAP + CAP) : []); } while (solved(start));
         st = [mk(), mk()]; over = false; endT = 0; winner = -1; t = 0;
       },
       update(dt) {
         t += dt; if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, winner >= 0 ? 'Sorted first.' : 'Time ran out.'); return; }
         for (let i = 0; i < 2; i++) {
-          const S = st[i], s = api.input(i); S.flash -= dt; if (S.fin) continue;
+          const S = st[i], s = api.input(i), tp = tap[i]; tap[i] = -1; S.flash -= dt; if (S.fin) continue;
+          if (tp >= 0) S.cur = tp;
           if (s.pl) S.cur = Math.max(0, S.cur - 1); if (s.pr) S.cur = Math.min(NP - 1, S.cur + 1);
           if (s.pb && S.held >= 0) { S.pegs[S.from].push(S.held); S.held = -1; }
-          if (s.pa) {
+          if (s.pa || tp >= 0) {
             const p = S.pegs[S.cur];
             if (S.held < 0) { if (p.length) { S.held = p.pop(); S.from = S.cur; api.beep('select'); } }
             else if (p.length < CAP && (p.length === 0 || p[p.length - 1] === S.held)) { p.push(S.held); if (S.cur !== S.from) S.moves++; S.held = -1; api.beep('place'); if (solved(S.pegs)) { S.fin = true; api.beep('win'); } }
