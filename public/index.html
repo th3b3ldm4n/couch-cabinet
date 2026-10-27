@@ -311,6 +311,7 @@ body{min-height:100dvh}
       <div class="chips" id="chips"></div>
       <div class="hudr">
         <span class="lab" id="roundlbl"></span>
+        <button class="btn ghost sm" id="tmode" type="button" hidden>Touch: screen</button>
         <button class="btn ghost sm" id="pause" type="button">Pause</button>
         <button class="btn ghost sm" id="fs" type="button">Fullscreen</button>
       </div>
@@ -476,16 +477,19 @@ const Sound = (() => {
 
 /* ---------- input: four keyboard layouts, four gamepads, one touch pad ---------- */
 const KEYMAPS = {
-  kbA: { label: 'Keyboard: WASD + Space', short: 'WASD + Space', up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'], a: ['Space', 'KeyF'], b: ['KeyG'] },
-  kbB: { label: 'Keyboard: Arrows + Enter', short: 'Arrows + Enter', up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'], a: ['Enter', 'Slash'], b: ['ShiftRight'] },
-  kbC: { label: 'Keyboard: IJKL + H', short: 'IJKL + H', up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'], a: ['KeyH'], b: ['KeyN'] },
-  kbD: { label: 'Keyboard: Numpad 8456 + 0', short: 'Numpad 8456 + 0', up: ['Numpad8'], down: ['Numpad5', 'Numpad2'], left: ['Numpad4'], right: ['Numpad6'], a: ['Numpad0', 'NumpadEnter'], b: ['NumpadDecimal'] }
+  kbA: { label: 'Keyboard: WASD, A=Space B=G', short: 'WASD (A Space, B G)', up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'], a: ['Space', 'KeyF'], b: ['KeyG', 'KeyE'] },
+  kbB: { label: 'Keyboard: Arrows, A=Enter B=Shift', short: 'Arrows (A Enter, B Shift)', up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'], a: ['Enter', 'Slash'], b: ['ShiftRight', 'Period'] },
+  kbC: { label: 'Keyboard: IJKL, A=H B=N', short: 'IJKL (A H, B N)', up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'], a: ['KeyH'], b: ['KeyN', 'KeyM'] },
+  kbD: { label: 'Keyboard: Numpad 8456, A=0 B=.', short: 'Numpad 8456 (A 0, B .)', up: ['Numpad8'], down: ['Numpad5', 'Numpad2'], left: ['Numpad4'], right: ['Numpad6'], a: ['Numpad0', 'NumpadEnter'], b: ['NumpadDecimal'] }
 };
 const DEVICES = ['kbA', 'kbB', 'kbC', 'kbD', 'pad0', 'pad1', 'pad2', 'pad3', 'touch'];
 const NONE = Object.freeze({ x: 0, y: 0, a: false, b: false, pa: false, pb: false, pu: false, pd: false, pl: false, pr: false, ps: false, on: false });
 const GAMEKEYS = new Set(['Space', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 Object.values(KEYMAPS).forEach(m => ['up', 'down', 'left', 'right', 'a', 'b'].forEach(k => m[k].forEach(c => GAMEKEYS.add(c))));
-const Touch = { up: false, down: false, left: false, right: false, a: false, b: false };
+const Touch = { up: false, down: false, left: false, right: false, a: false, b: false, ax: 0, ay: 0 };
+const KN = { Space: 'Space', ShiftRight: 'Right Shift', Slash: '/', Period: '.', NumpadDecimal: 'Num .', Numpad0: 'Num 0', NumpadEnter: 'Num Enter', Enter: 'Enter' };
+const keyName = k => KN[k] || k.replace(/^Key/, '');
+const legend = id => { const m = KEYMAPS[id]; if (m) return `${m.short.split(' (')[0]} to move · A = ${m.a.map(keyName).join(' or ')} · B = ${m.b.map(keyName).join(' or ')}`; return id === 'touch' ? 'On-screen D-pad, A and B buttons' : 'Stick or D-pad to move · A and B buttons'; };
 const devLabel = id => KEYMAPS[id] ? KEYMAPS[id].label : id === 'touch' ? 'Touch pad (on-screen buttons)' : 'Gamepad ' + (+id.slice(3) + 1);
 const devShort = id => KEYMAPS[id] ? KEYMAPS[id].short : id === 'touch' ? 'Touch pad' : 'Gamepad ' + (+id.slice(3) + 1);
 
@@ -515,7 +519,7 @@ const Input = (() => {
         const m = KEYMAPS[id];
         r = { x: (any(m.right) ? 1 : 0) - (any(m.left) ? 1 : 0), y: (any(m.down) ? 1 : 0) - (any(m.up) ? 1 : 0), a: any(m.a), b: any(m.b), s: false };
       } else if (id === 'touch') {
-        r = { x: (Touch.right ? 1 : 0) - (Touch.left ? 1 : 0), y: (Touch.down ? 1 : 0) - (Touch.up ? 1 : 0), a: Touch.a, b: Touch.b, s: false };
+        r = { x: Touch.ax || ((Touch.right ? 1 : 0) - (Touch.left ? 1 : 0)), y: Touch.ay || ((Touch.down ? 1 : 0) - (Touch.up ? 1 : 0)), a: Touch.a, b: Touch.b, s: false };
       } else r = readPad(+id.slice(3));
       if (!r) { cur[id] = null; prev[id] = {}; continue; }
       if (r.a) lat[id].a = true; if (r.b) lat[id].b = true;
@@ -793,7 +797,7 @@ const App = (() => {
         const n = Input.padName(+s.device.slice(3));
         st = n ? 'Connected: ' + n : 'Not detected yet. Press a button on the controller.';
       } else if (s.device === 'touch') st = 'On-screen D-pad and A/B buttons appear under the game.';
-      else st = 'Keys: ' + KEYMAPS[s.device].short + '. Space/Enter/H/0 acts as A.';
+      else st = 'Keys: ' + KEYMAPS[s.device].short + '. Spare keys: ' + KEYMAPS[s.device].a.concat(KEYMAPS[s.device].b).map(keyName).join(', ') + '.';
       const twin = seats.findIndex((o, j) => j !== i && o.on && s.on && o.device === s.device);
       if (twin >= 0) st = 'Shared with seat ' + (twin + 1) + '. Pass it around in turn-based games.';
       $('#st' + i).textContent = st;
@@ -929,8 +933,9 @@ const App = (() => {
     $('#pause').hidden = m.online; $('#waiting').hidden = true;
     $('#quit').textContent = m.online ? 'Leave match' : 'Back to shelf';
     const usesTouch = m.online ? m.dev === 'touch' : players.some(p => p.device === 'touch');
-    $('#touchpad').hidden = !usesTouch;
-    const ctl = m.online ? `You: ${devShort(m.dev)}` : players.map(p => `${p.name}: ${devShort(p.device)}`).join('   |   ');
+    curTouch = usesTouch; syncTouchUI();
+    if (usesTouch && touchMode === 'screen') toast('Touch the screen: drag on the left to move, hold the right side for A, a second finger there for B');
+    const ctl = m.online ? `You: ${legend(m.dev)}` : players.map(p => `${p.name}: ${legend(p.device)}`).join('   |   ');
     $('#help').innerHTML = '';
     $('#help').append(h('b', {}, def.title + '. '), def.help, h('span', { class: 'ctl' }, ctl));
     beginRound(); window.scrollTo(0, 0);
@@ -973,7 +978,7 @@ const App = (() => {
     hideOverlay(); match = null; view = 'hub';
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
     $('#stage').hidden = true; $('#hub').hidden = false; $('#touchpad').hidden = true; $('#waiting').hidden = true;
-    Object.keys(Touch).forEach(k => { Touch[k] = false; });
+    Object.keys(Touch).forEach(k => { Touch[k] = typeof Touch[k] === 'number' ? 0 : false; }); vp.clear(); drags.clear();
     syncSeats(); renderOnline(); markSel(true);
   }
   function pause() {
@@ -1040,14 +1045,14 @@ const App = (() => {
     while (m.acc >= TICK && n < 6 && match === m && m.state !== 'paused') {
       m.acc -= TICK; n++;
       const cache = {};
-      m.players.forEach((p, i) => { if (cache[p.device] === undefined) cache[p.device] = packRaw(Input.sample(p.device)); setSt(m, i, cache[p.device]); });
+      m.players.forEach((p, i) => { if (p.device === 'touch' && dragOn(m)) { setSt(m, i, packRaw(sampleFor(m, 'touch', i))); return; } if (cache[p.device] === undefined) cache[p.device] = packRaw(Input.sample(p.device)); setSt(m, i, cache[p.device]); });
       tickCore(m);
     }
   }
   function onlineAdvance(m, dt) {
     if (m.state === 'desync') return;
     m.acc = Math.min(m.acc + dt, TICK * 4);
-    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(Input.sample(m.dev))); }
+    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(sampleFor(m, m.dev, m.li))); }
     if (m.acc >= TICK) m.acc = TICK;
     let k = 0, ran = false;
     while (k < 10 && match === m && m.state !== 'desync') {
@@ -1103,8 +1108,53 @@ const App = (() => {
     const r = cv.getBoundingClientRect();
     return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
   }
-  cv.addEventListener('pointerdown', e => { if (match && !match.online && match.state === 'play' && match.game.pointer) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'down'); } });
-  cv.addEventListener('pointermove', e => { if (match && !match.online && match.state === 'play' && match.game.pointer) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'move'); } });
+  /* touch-screen controls: drag on the left half = stick, hold the right half = A, a second finger on the right = B.
+     Board games that have their own tap targets still use direct taps when played on one device. */
+  /* direct drag: games that expose drag(i) follow your finger (paddles, crosshairs, droppers) */
+  const drags = new Map(), dragA = [0, 0, 0, 0];
+  let touchMode = store.get('touchMode', 'screen'), curTouch = false;
+  const dragOn = m => curTouch && touchMode === 'screen' && m && m.game && typeof m.game.drag === 'function';
+  const touchSeats = m => m.online ? [m.li] : m.players.map((p, i) => p.device === 'touch' ? i : -1).filter(i => i >= 0);
+  const playerForX = (m, x) => { const t = touchSeats(m); if (t.length < 2) return t[0] === undefined ? 0 : t[0]; return x < W / 2 ? t[0] : t[1]; };
+  function sampleFor(m, dev, i) {
+    const r = Input.sample(dev);
+    if (dev !== 'touch' || !dragOn(m)) return r;
+    let tgt = null; for (const d of drags.values()) if (d.pi === i && (!tgt || d.t > tgt.t)) tgt = d;
+    const cur = m.game.drag(i), ax = m.game.dragAxes || 'xy';
+    r.x = 0; r.y = 0;
+    if (tgt && cur) { if (ax.includes('x')) { const dx = tgt.x - cur.x; r.x = Math.abs(dx) < 3 ? 0 : clamp(dx / 28, -1, 1); } if (ax.includes('y')) { const dy = tgt.y - cur.y; r.y = Math.abs(dy) < 3 ? 0 : clamp(dy / 28, -1, 1); } }
+    r.a = r.a || performance.now() < dragA[i];
+    return r;
+  }
+  const vp = new Map();
+  const syncTouchUI = () => { $('#touchpad').hidden = !curTouch || touchMode !== 'buttons'; const t = $('#tmode'); t.hidden = !curTouch; t.textContent = touchMode === 'screen' ? 'Touch: screen' : 'Touch: buttons'; };
+  const virtOn = () => curTouch && touchMode === 'screen' && match && match.state === 'play';
+  cv.addEventListener('pointerdown', e => {
+    if (!match || match.state !== 'play') return;
+    if (match.game.pointer && !match.online) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'down'); return; }
+    if (!virtOn() || e.pointerType === 'mouse') return;
+    e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch (er) { }
+    if (match.game.drag) { const [x, y] = pointerPos(e); drags.set(e.pointerId, { x, y, sx: x, sy: y, t: performance.now(), t0: performance.now(), pi: playerForX(match, x) }); return; }
+    const r = cv.getBoundingClientRect(); let role;
+    if (e.clientX - r.left < r.width / 2) { if ([...vp.values()].some(v => v.role === 'stick')) return; role = 'stick'; }
+    else { role = !Touch.a ? 'a' : 'b'; if (Touch[role]) return; Touch[role] = true; }
+    vp.set(e.pointerId, { role, sx: e.clientX, sy: e.clientY });
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!match || match.state !== 'play') return;
+    if (match.game.pointer && !match.online) { const [x, y] = pointerPos(e); match.game.pointer(x, y, 'move'); return; }
+    const dg = drags.get(e.pointerId); if (dg) { const [x, y] = pointerPos(e); dg.x = x; dg.y = y; dg.t = performance.now(); return; }
+    const v = vp.get(e.pointerId); if (!v || v.role !== 'stick') return;
+    const R = Math.max(36, cv.getBoundingClientRect().width * .06); let dx = (e.clientX - v.sx) / R, dy = (e.clientY - v.sy) / R; const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; v.sx += (m - 1) * R * dx; v.sy += (m - 1) * R * dy; }
+    Touch.ax = m < .28 ? 0 : Math.round(dx * 10) / 10; Touch.ay = m < .28 ? 0 : Math.round(dy * 10) / 10;
+  });
+  const vrel = e => {
+    const dg = drags.get(e.pointerId);
+    if (dg) { drags.delete(e.pointerId); const f = match && match.game && match.game.dragFire; if (f === 'release' || (f === 'tap' && performance.now() - dg.t0 < 260 && Math.hypot(dg.x - dg.sx, dg.y - dg.sy) < 24)) dragA[dg.pi] = performance.now() + 110; return; }
+    const v = vp.get(e.pointerId); if (!v) return; vp.delete(e.pointerId); if (v.role === 'stick') { Touch.ax = 0; Touch.ay = 0; } else Touch[v.role] = false; };
+  cv.addEventListener('pointerup', vrel); cv.addEventListener('pointercancel', vrel); cv.addEventListener('lostpointercapture', vrel);
+  cv.addEventListener('contextmenu', e => e.preventDefault());
   addEventListener('keydown', e => {
     if (view === 'game') {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1181,6 +1231,7 @@ const App = (() => {
       else toast('Fullscreen is not available here');
     };
     const tp = $('#touchpad');
+    $('#tmode').onclick = () => { touchMode = touchMode === 'screen' ? 'buttons' : 'screen'; store.set('touchMode', touchMode); vp.clear(); drags.clear(); Touch.ax = Touch.ay = 0; Touch.a = Touch.b = false; syncTouchUI(); toast(touchMode === 'screen' ? 'Touch the screen to play' : 'On-screen buttons on'); };
     tp.addEventListener('pointerdown', e => {
       const b = e.target.closest ? e.target.closest('[data-k]') : null; if (!b) return; e.preventDefault();
       Touch[b.dataset.k] = true; b.classList.add('on'); try { b.setPointerCapture(e.pointerId); } catch (er) { }
@@ -1192,7 +1243,7 @@ const App = (() => {
     renderOnline(); hashJoin(); addEventListener('hashchange', hashJoin);
     requestAnimationFrame(frame);
   }
-  return { init, renderShelf, ready: false, toast, joinRoom, startGame, debug: () => ({ view, match }) };
+  return { init, renderShelf, ready: false, toast, joinRoom, startGame, debug: () => ({ view, match, touch: Object.assign({}, Touch), mode: touchMode }) };
 })();
 
 /* =====================================================================
@@ -1479,6 +1530,7 @@ registerGame({
       if (ball.x < -30) { score[1]++; point(1); } else if (ball.x > W + 30) { score[0]++; point(0); }
     }
     return {
+      dragAxes: 'y', drag: i => ({ x: PX[i], y: py[i] }),
       reset(r) { over = false; score = [0, 0]; py = [H / 2, H / 2]; flash = [0, 0]; serve(r % 2 ? 1 : -1); },
       update(dt) {
         for (let i = 0; i < 2; i++) { py[i] = clamp(py[i] + api.input(i).y * PS * dt, PH / 2 + 12, H - PH / 2 - 12); flash[i] = Math.max(0, flash[i] - dt); }
@@ -2447,6 +2499,7 @@ registerGame({
       cur = { x, y: topOf() - 160 - h, w, h, c: T[2], k: T[3], land: top - h, v: 0 }; phase = 'drop';
     }
     return {
+      dragAxes: 'x', dragFire: 'release', drag: () => ({ x: hx, y: 0 }),
       reset(r) { blocks = []; turn = r % 2; hx = 480; phase = 'aim'; over = false; endT = 0; winner = -1; cam = 0; loser = -1; fall = null; anim = 0; msg = ''; newPiece(); api.turn(turn); },
       update(dt) {
         anim += dt; const want = Math.max(0, 260 - topOf()); cam += (want - cam) * Math.min(1, dt * 4);
@@ -2620,6 +2673,7 @@ registerGame({
       else { serve = 1.1; puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0; }
     }
     return {
+      dragAxes: 'xy', drag: i => pad[i],
       reset(r) {
         score = [0, 0]; pad = [{ x: 130, y: H / 2, vx: 0, vy: 0 }, { x: W - 130, y: H / 2, vx: 0, vy: 0 }];
         puck = { x: W / 2, y: H / 2, vx: 0, vy: 0 }; serve = .5; over = false; endT = 0; flash = 0;
@@ -2866,6 +2920,7 @@ registerGame({
     const col = i => api.players[i].color, TOTAL = 30;
     let cross, targets, score, tl, spawn, pops, over, endT;
     return {
+      dragAxes: 'xy', dragFire: 'tap', drag: i => cross[i],
       reset() { cross = [{ x: 240, y: 330, cd: 0 }, { x: 720, y: 330, cd: 0 }]; targets = []; score = [0, 0]; tl = TOTAL; spawn = .3; pops = []; over = false; endT = 0; },
       update(dt) {
         pops = pops.filter(p => (p.t -= dt) > 0);
@@ -4274,6 +4329,7 @@ registerGame({
       if (gone.size) P.f = f.filter(b => !gone.has(b)).concat(add);
     }
     return {
+      dragAxes: 'x', dragFire: 'release', drag: i => ({ x: pl[i].x, y: 0 }),
       reset() {
         pl = [0, 1].map(i => ({ f: [], x: jx(i) + JW / 2, cd: .4, next: irand(0, 2), score: 0, warn: 0 }));
         fr = 80; over = false; endT = 0; winner = -1; msg = '';
@@ -4626,6 +4682,7 @@ registerGame({
     const LW = 380, LX = [70, 510], LEN = 6400, SY = 430, col = i => api.players[i].color;
     let obs, ball, over, endT, winner, t;
     return {
+      dragAxes: 'x', drag: i => ({ x: LX[i] + ball[i].x, y: 0 }),
       reset() {
         obs = []; for (let y = 700; y < LEN - 300; y += irand(150, 240)) { const k = irand(0, 2); if (k === 0) obs.push({ k: 'peg', y, x: irand(40, LW - 40), r: 20 }); else if (k === 1) { const w = irand(110, 170), x = irand(0, LW - w); obs.push({ k: 'bar', y, x, w, h: 20 }); } else { obs.push({ k: 'peg', y, x: irand(40, LW / 2), r: 18 }); obs.push({ k: 'peg', y: y + 30, x: irand(LW / 2, LW - 40), r: 18 }); } }
         ball = [0, 1].map(() => ({ x: LW / 2, y: 0, vx: 0, sp: 280, hit: 0 })); over = false; endT = 0; winner = -1; t = 0;
