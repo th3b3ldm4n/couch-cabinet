@@ -467,6 +467,7 @@ const Rng = (() => {
 })();
 const rand = (a = 0, b = 1) => a + Rng.next() * (b - a);
 const irand = (a, b) => Math.floor(rand(a, b + 1));
+const rint = n => Math.floor(rand(0, n));
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = irand(0, i);[a[i], a[j]] = [a[j], a[i]]; } return a; };
 function hash32(str) { let x = 2166136261; for (let i = 0; i < str.length; i++) { x ^= str.charCodeAt(i); x = Math.imul(x, 16777619); } return x >>> 0; }
 const store = {
@@ -2357,7 +2358,7 @@ registerGame({
 
 /* ---------- Artillery ---------- */
 registerGame({
-  id: 'artillery', title: 'Artillery', blurb: 'Dial in angle and power, fire over the hills, mind the wind.',
+  id: 'artillery', cpu: true, title: 'Artillery', blurb: 'Dial in angle and power, fire over the hills, mind the wind.',
   kind: 'turns', min: 2, max: 4, color: 3,
   help: 'On your turn: left/right turns the barrel, up/down sets power, A fires. Craters reshape the ground.',
   icon() {
@@ -2417,7 +2418,35 @@ registerGame({
         g.lineTo(t.x + Math.cos(a) * (32 + t.pow * 1.5), t.y - 14 - Math.sin(a) * (32 + t.pow * 1.5)); g.stroke(); g.setLineDash([]);
       }
     }
+    /* what a shot would hit, using the same physics as stepProj (craters ignored) */
+    function simShot(t, ang, pow, me) {
+      const a = ang * Math.PI / 180, sp = 100 + pow * 6; let x = t.x + Math.cos(a) * 22, y = t.y - 14 - Math.sin(a) * 22, vx = Math.cos(a) * sp, vy = -Math.sin(a) * sp, age = 0; const h = 1 / 60;
+      for (let k = 0; k < 900; k++) {
+        age += h; vx += wind * 6 * h; vy += 380 * h; x += vx * h; y += vy * h;
+        if (x < 0 || x > W || y > H + 60) return { x, y: H };
+        if (y >= gy(x)) return { x, y };
+        for (let i = 0; i < n; i++) { const o = tanks[i]; if (!o.alive || (i === me && age < .25)) continue; if (Math.hypot(x - o.x, y - (o.y - 10)) < 18) return { x, y }; }
+      }
+      return { x, y };
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (state !== 'aim' || turn !== i) { Z[i] = null; return null; }
+        const t = tanks[i], L = api.cpu;
+        if (!Z[i]) {
+          let best = null, bs = 1e9; const foes = tanks.filter((o, k) => k !== i && o.alive);
+          for (let ang = 8; ang <= 172; ang += 4) for (let pow = 15; pow <= 100; pow += 5) {
+            const r = simShot(t, ang, pow, i); if (Math.hypot(r.x - t.x, r.y - t.y) < 70) continue;
+            let d = 1e9; for (const o of foes) d = Math.min(d, Math.hypot(r.x - o.x, r.y - (o.y - 10)));
+            if (d < bs) { bs = d; best = [ang, pow]; }
+          }
+          best = best || [t.ang, t.pow];
+          Z[i] = { a: clamp(best[0] + rand(-1, 1) * [9, 3.5, 1][L], 0, 180), p: clamp(best[1] + rand(-1, 1) * [12, 5, 1.5][L], 10, 100), w: rand(.6, 1.3) };
+        }
+        const P = Z[i]; t.ang += clamp(P.a - t.ang, -90 * dt, 90 * dt); t.pow += clamp(P.p - t.pow, -55 * dt, 55 * dt);
+        if (Math.abs(P.a - t.ang) < .6 && Math.abs(P.p - t.pow) < .8) { P.w -= dt; if (P.w <= 0) { Z[i] = null; fire(); } }
+        return null;
+      },
       touch: 'Press, pull back from your tank and let go to fire. The farther you pull, the more power.',
       pointer(x, y, t) {
         if (state !== 'aim') return; const tk = tanks[turn], bx = tk.x, by = tk.y - 14;
@@ -2483,13 +2512,13 @@ registerGame({
 /* ---------- Pong ---------- */
 registerGame({
   id: 'pong', cpu: true, title: 'Pong', blurb: 'The original duel. First to five, and the ball keeps speeding up.',
-  kind: 'live', min: 2, max: 2, color: 1,
-  help: 'Up and down move your paddle. Hit the ball off the edge of the paddle to change its angle.',
+  kind: 'live', min: 2, max: 4, color: 1,
+  help: 'Up and down move your paddle. Hit the ball off the edge of the paddle to change its angle. With 3 or 4 players it becomes doubles: players 1 and 3 against 2 and 4.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="#0F1923" stroke="none"><rect x="26" y="30" width="11" height="50" rx="4"/><rect x="163" y="52" width="11" height="50" rx="4"/><circle cx="104" cy="58" r="9"/><g opacity=".5"><rect x="98" y="8" width="5" height="12" rx="2"/><rect x="98" y="30" width="5" height="12" rx="2"/><rect x="98" y="76" width="5" height="12" rx="2"/><rect x="98" y="98" width="5" height="12" rx="2"/></g></svg>`;
   },
   create(api) {
-    const PW = 14, PH = 110, PS = 560, GOAL = 5, PX = [34, W - 34], col = i => api.players[i].color;
+    const PW = 14, PH = 110, PS = 560, GOAL = 5, PX = [34, W - 34, 78, W - 78], N = () => api.players.length, tm = i => i % 2, col = i => api.players[i].color;
     let py, ball, score, serveT, flash, trail, over;
     function serve(dir) { ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 9, sp: 380, dir }; serveT = .9; trail = []; }
     function point(w) {
@@ -2502,8 +2531,8 @@ registerGame({
       ball.x += ball.vx * h; ball.y += ball.vy * h;
       if (ball.y < ball.r + 10) { ball.y = ball.r + 10; ball.vy = Math.abs(ball.vy); api.beep('wall'); }
       if (ball.y > H - ball.r - 10) { ball.y = H - ball.r - 10; ball.vy = -Math.abs(ball.vy); api.beep('wall'); }
-      for (let i = 0; i < 2; i++) {
-        const out = i ? -1 : 1;
+      for (let i = 0; i < N(); i++) {
+        const out = tm(i) ? -1 : 1;
         if (ball.vx * out < 0 && Math.abs(ball.x - PX[i]) <= PW / 2 + ball.r && Math.abs(ball.y - py[i]) <= PH / 2 + ball.r) {
           const off = clamp((ball.y - py[i]) / (PH / 2), -1, 1), ang = off * .9;
           ball.sp = Math.min(900, ball.sp * 1.06); ball.vx = Math.cos(ang) * ball.sp * out; ball.vy = Math.sin(ang) * ball.sp;
@@ -2515,7 +2544,7 @@ registerGame({
     return {
       dragAxes: 'y', drag: i => ({ x: PX[i], y: py[i] }),
       ai(i, dt) {
-        const S = (this.s || (this.s = []))[i] || (this.s[i] = {}), L = api.cpu, out = i ? -1 : 1;
+        const S = (this.s || (this.s = []))[i] || (this.s[i] = {}), L = api.cpu, out = tm(i) ? -1 : 1;
         if (S.y == null || Math.abs(S.y - py[i]) > 200) S.y = py[i];
         let ty = H / 2 + (ball.y - H / 2) * .3;
         if (!over && ball.vx * out < 0 && Math.abs(ball.vx) > 1) {
@@ -2525,9 +2554,9 @@ registerGame({
         const sp = PS * [.55, .8, 1.05][L] * dt; S.y += clamp(ty - S.y, -sp, sp);
         return { ptr: { x: PX[i], y: S.y, down: false } };
       },
-      reset(r) { over = false; score = [0, 0]; py = [H / 2, H / 2]; flash = [0, 0]; serve(r % 2 ? 1 : -1); },
+      reset(r) { over = false; score = [0, 0]; py = api.players.map(() => H / 2); flash = api.players.map(() => 0); serve(r % 2 ? 1 : -1); },
       update(dt) {
-        for (let i = 0; i < 2; i++) { { const s0 = api.input(i); py[i] = clamp(s0.ph ? s0.py : py[i] + s0.y * PS * dt, PH / 2 + 12, H - PH / 2 - 12); } flash[i] = Math.max(0, flash[i] - dt); }
+        for (let i = 0; i < N(); i++) { { const s0 = api.input(i); py[i] = clamp(s0.ph ? s0.py : py[i] + s0.y * PS * dt, PH / 2 + 12, H - PH / 2 - 12); } flash[i] = Math.max(0, flash[i] - dt); }
         if (serveT > 0) {
           serveT -= dt;
           if (serveT <= 0) { const a = rand(-.45, .45); ball.vx = Math.cos(a) * ball.sp * ball.dir; ball.vy = Math.sin(a) * ball.sp; }
@@ -2540,9 +2569,9 @@ registerGame({
       draw(g) {
         g.fillStyle = SCR.line; g.fillRect(0, 0, W, 8); g.fillRect(0, H - 8, W, 8);
         for (let y = 20; y < H - 20; y += 34) g.fillRect(W / 2 - 2, y, 4, 18);
-        D.text(g, score[0], W / 2 - 90, 78, 96, col(0)); D.text(g, score[1], W / 2 + 90, 78, 96, col(1));
-        for (let i = 0; i < 2; i++) {
-          const w = PW + flash[i] * 40; g.fillStyle = col(i); D.rr(g, PX[i] - w / 2, py[i] - PH / 2, w, PH, 6); g.fill();
+        D.text(g, score[0], W / 2 - 90, 78, 96, col(0)); D.text(g, score[1], W / 2 + 90, 78, 96, col(1)); if (N() > 2) D.text(g, 'Doubles', W / 2, H - 22, 20, SCR.dim);
+        for (let i = 0; i < N(); i++) {
+          const w = PW + flash[i] * 40; g.fillStyle = col(tm(i) === i ? i : i); D.rr(g, PX[i] - w / 2, py[i] - PH / 2, w, PH, 6); g.fill();
         }
         trail.forEach((p, i) => { g.globalAlpha = i / trail.length * .35; D.disc(g, p[0], p[1], ball.r * (.5 + i / trail.length * .5), SCR.fg); });
         g.globalAlpha = 1; D.disc(g, ball.x, ball.y, ball.r, SCR.fg);
@@ -2553,7 +2582,7 @@ registerGame({
 
 /* ---------- Snake Battle ---------- */
 registerGame({
-  id: 'snake', title: 'Snake Battle', blurb: 'Eat, grow, and box the others in. Last snake slithering wins.',
+  id: 'snake', cpu: true, title: 'Snake Battle', blurb: 'Eat, grow, and box the others in. Last snake slithering wins.',
   kind: 'live', min: 2, max: 4, color: 3,
   help: 'Steer with the stick, D-pad or keys. Crashing into any snake or wall ends your run.',
   icon() {
@@ -2587,6 +2616,20 @@ registerGame({
       if (al.length <= 1 && !over) { over = true; endT = 1; winner = al.length ? al[0] : -1; }
     }
     return {
+      ai(i) {
+        const s = sn[i]; if (!s || !s.alive || over) return null;
+        const L = api.cpu, occ = new Set(); sn.forEach(o => { if (o.alive) o.body.forEach(c => occ.add(key(c[0], c[1]))); });
+        const hd = s.body[0], free = (x, y) => x >= 0 && y >= 0 && x < GW && y < GH && !occ.has(key(x, y));
+        const room = (x, y, lim) => { const seen = new Set([key(x, y)]), q = [[x, y]]; for (let h = 0; h < q.length && q.length < lim; h++) for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nx = q[h][0] + d[0], ny = q[h][1] + d[1], k = key(nx, ny); if (free(nx, ny) && !seen.has(k)) { seen.add(k); q.push([nx, ny]); } } return q.length; };
+        let best = null, bs = -1e9;
+        for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (d[0] === -s.dir[0] && d[1] === -s.dir[1]) continue; const nx = hd[0] + d[0], ny = hd[1] + d[1]; if (!free(nx, ny)) continue;
+          let sc = room(nx, ny, 70) * [1, 2, 3][L], fd = 99; food.forEach(f => { fd = Math.min(fd, Math.abs(f[0] - nx) + Math.abs(f[1] - ny)); });
+          sc -= fd * [.3, 1.2, 2][L]; sc += rand(0, [26, 8, 1][L]); if (d[0] === s.dir[0] && d[1] === s.dir[1]) sc += 1.5;
+          if (sc > bs) { bs = sc; best = d; }
+        }
+        return best ? { x: best[0], y: best[1] } : null;
+      },
       dragAxes: 'xy', drag: i => { const b = sn[i] && sn[i].alive && sn[i].body[0]; return b ? { x: b[0] * CS + CS / 2, y: b[1] * CS + CS / 2 } : null; },
       reset() {
         sn = []; food = []; over = false; acc = 0; tm = 0; winner = -1;
@@ -2635,7 +2678,7 @@ registerGame({
 
 /* ---------- Tank Arena ---------- */
 registerGame({
-  id: 'tanks', title: 'Tank Arena', blurb: 'Bank shots off the walls. One hit and you are out.',
+  id: 'tanks', cpu: true, title: 'Tank Arena', blurb: 'Bank shots off the walls. One hit and you are out.',
   kind: 'live', min: 2, max: 4, color: 0,
   help: 'Move to turn and drive. A fires in the direction you face. Shots ricochet up to three times, and yes, they can hit you.',
   icon() {
@@ -2665,7 +2708,19 @@ registerGame({
       let x = t.x + Math.cos(t.a) * (R + 6), y = t.y + Math.sin(t.a) * (R + 6); if (hitWall(x, y, 4)) { x = t.x; y = t.y; }
       bul.push({ x, y, vx: Math.cos(t.a) * BS, vy: Math.sin(t.a) * BS, o: i, n: 0, age: 0 }); t.cd = .35; api.beep('shot');
     }
+    function los(a, b) { const d = Math.hypot(b.x - a.x, b.y - a.y), st = Math.ceil(d / 8); for (let k = 1; k < st; k++) if (hitWall(a.x + (b.x - a.x) * k / st, a.y + (b.y - a.y) * k / st, 3)) return false; return true; }
     return {
+      ai(i) {
+        const t = tanks[i]; if (!t || !t.alive || over) return null; const S = this.s || (this.s = []), st = S[i] || (S[i] = { w: 0, tx: t.x, ty: t.y }), L = api.cpu;
+        let tg = null, bd = 1e9; tanks.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.hypot(o.x - t.x, o.y - t.y); if (d < bd) { bd = d; tg = o; } } });
+        /* dodge nearby bullets, otherwise hunt: keep a gap, line up shots */
+        let dx = 0, dy = 0, danger = null; bul.forEach(b => { if (b.o === i && b.age < .5) return; const d = Math.hypot(b.x - t.x, b.y - t.y); if (d < 120 && (b.vx * (t.x - b.x) + b.vy * (t.y - b.y)) > 0) danger = b; });
+        if (danger && L > 0) { const px = -danger.vy, py = danger.vx, m = Math.hypot(px, py) || 1, sg = (px * (t.x - danger.x) + py * (t.y - danger.y)) >= 0 ? 1 : -1; dx = px / m * sg; dy = py / m * sg; }
+        else if (tg) { st.w -= 1 / 60; if (st.w <= 0 || Math.hypot(st.tx - t.x, st.ty - t.y) < 20) { st.w = rand(.8, 1.8); const a = rand(0, TAU), r = rand(80, 220); st.tx = clamp(tg.x + Math.cos(a) * r, 50, W - 50); st.ty = clamp(tg.y + Math.sin(a) * r, 50, H - 50); } const ex = st.tx - t.x, ey = st.ty - t.y, m = Math.hypot(ex, ey) || 1; dx = ex / m * (bd < 150 ? -.4 : 1) * [.5, .8, 1][L]; dy = ey / m * (bd < 150 ? -.4 : 1) * [.5, .8, 1][L]; }
+        let a = false; if (tg && los(t, tg) && t.cd <= 0 && rand() < [.03, .08, .16][L]) { const aim = Math.atan2(tg.y - t.y, tg.x - t.x), diff = Math.abs(Math.atan2(Math.sin(aim - t.a), Math.cos(aim - t.a))); if (diff < .2) a = true; else { dx = Math.cos(aim) * .3; dy = Math.sin(aim) * .3; } }
+        if (tg && Math.hypot(dx, dy) < .3 && los(t, tg)) { dx = Math.cos(Math.atan2(tg.y - t.y, tg.x - t.x)) * .3; dy = Math.sin(Math.atan2(tg.y - t.y, tg.x - t.x)) * .3; }
+        return { x: dx, y: dy, a };
+      },
       pointerRaw: true, touch: 'Your barrel aims at the pointer. Hold to drive toward it, let go to fire.',
       reset() {
         layout(); bul = []; parts = []; over = false; winner = -1; endT = 0;
@@ -2975,7 +3030,7 @@ registerGame({
 
 /* ---------- Dots and Boxes ---------- */
 registerGame({
-  id: 'dots', title: 'Dots & Boxes', blurb: 'Draw lines between dots. Close a box, claim it, go again.',
+  id: 'dots', cpu: true, title: 'Dots & Boxes', blurb: 'Draw lines between dots. Close a box, claim it, go again.',
   kind: 'turns', min: 2, max: 4, color: 2,
   help: 'Move along the lines and press A to draw one. B switches between horizontal and vertical lines. Finish a box to take another turn.',
   icon() {
@@ -3007,7 +3062,29 @@ registerGame({
       for (let r = 0; r < N; r++) for (let c = 0; c <= N; c++) { const d = Math.hypot(x - dx(c), y - (dy(r) + dy(r + 1)) / 2); if (d < bd) { bd = d; best = { t: 'v', r, c }; } }
       return best;
     }
+    const bc = (r, c) => (hE[r][c] >= 0) + (hE[r + 1][c] >= 0) + (vE[r][c] >= 0) + (vE[r][c + 1] >= 0);
+    function pickEdge() {
+      const L = api.cpu, all = [];
+      const adj = e => e.t === 'h' ? [[e.r - 1, e.c], [e.r, e.c]] : [[e.r, e.c - 1], [e.r, e.c]];
+      for (let r = 0; r <= N; r++) for (let c = 0; c < N; c++) if (hE[r][c] < 0) all.push({ t: 'h', r, c });
+      for (let r = 0; r < N; r++) for (let c = 0; c <= N; c++) if (vE[r][c] < 0) all.push({ t: 'v', r, c });
+      const take = [], safe = [], rest = [];
+      for (const e of all) {
+        const bs = adj(e).filter(([r, c]) => r >= 0 && c >= 0 && r < N && c < N && box[r][c] < 0);
+        if (bs.some(([r, c]) => bc(r, c) === 3)) take.push(e); else if (bs.every(([r, c]) => bc(r, c) < 2)) safe.push(e); else rest.push({ e, cost: bs.filter(([r, c]) => bc(r, c) === 2).length });
+      }
+      if (take.length && rand(0, 1) < [.7, .95, 1][L]) return take[rint(take.length)];
+      if (safe.length && rand(0, 1) < [.7, .95, 1][L]) return safe[rint(safe.length)];
+      if (rest.length && !safe.length) { rest.sort((a, b) => a.cost - b.cost); const m = rest[0].cost, c = rest.filter(x => x.cost === m); return c[rint(c.length)].e; }
+      return all[rint(all.length)];
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.45, .9) : Z[i]) - dt;
+        if (Z[i] > 0) return null;
+        Z[i] = null; const e = pickEdge(); if (!e) return null; cur = e; place(); return null;
+      },
       reset(r) { hE = mk(N + 1, N); vE = mk(N, N + 1); box = mk(N, N); got = Array(n).fill(0); turn = r % n; cur = { t: 'h', r: 2, c: 2 }; over = false; endT = 0; again = false; api.turn(turn); },
       update(dt) {
         if (over) {
@@ -3047,7 +3124,7 @@ registerGame({
 
 /* ---------- Mancala ---------- */
 registerGame({
-  id: 'mancala', title: 'Mancala', blurb: 'Sow seeds around the board. Fill your store, capture the rest.',
+  id: 'mancala', cpu: true, title: 'Mancala', blurb: 'Sow seeds around the board. Fill your store, capture the rest.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Left and right pick a pit on your side, A sows it counter-clockwise. Land the last seed in your store to go again, or in an empty pit of yours to capture the pit opposite.',
   icon() {
@@ -3076,7 +3153,21 @@ registerGame({
       }
       if (!extra) turn = 1 - turn; api.turn(turn); focus(); state = 'aim';
     }
+    function rate(p, kk) {
+      const t = s.slice(); let pit = pitOf(p, kk), h = t[pit], pos = pit; t[pit] = 0;
+      while (h > 0) { pos = (pos + 1) % 14; if (pos === store(1 - p)) continue; t[pos]++; h--; }
+      let sc = (t[store(p)] - s[store(p)]) * 2;
+      if (pos === store(p)) sc += 4;
+      else if (own(pos, p) && t[pos] === 1 && t[12 - pos] > 0) sc += 2 + t[12 - pos] * 2;
+      return sc + rand(0, 1.5);
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (state !== 'aim' || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, 1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        let best = -1, bs = -1e9; for (let kk = 0; kk < 6; kk++) if (s[pitOf(turn, kk)] > 0) { const v = api.cpu === 0 ? rand(0, 5) : rate(turn, kk); if (v > bs) { bs = v; best = kk; } }
+        if (best >= 0) { k = best; start(best); } return null;
+      },
       reset(r) { s = [4, 4, 4, 4, 4, 4, 0, 4, 4, 4, 4, 4, 4, 0]; turn = r % 2; over = false; endT = 0; state = 'aim'; flash = -1; focus(); api.turn(turn); },
       update(dt) {
         if (state === 'aim') {
@@ -3120,7 +3211,7 @@ registerGame({
 
 /* ---------- Memory Match ---------- */
 registerGame({
-  id: 'memory', title: 'Memory Match', blurb: 'Flip two cards, find the pair. A match keeps your turn.',
+  id: 'memory', cpu: true, title: 'Memory Match', blurb: 'Flip two cards, find the pair. A match keeps your turn.',
   kind: 'turns', min: 2, max: 4, color: 3,
   help: 'Move the cursor and press A to flip a card. Find a pair to score and flip again. Miss and the next player goes.',
   icon() {
@@ -3131,7 +3222,7 @@ registerGame({
     const SYMS = [['circle', '#E8502E'], ['square', '#2F7BEA'], ['tri', '#E0A800'], ['star', '#1FB574'], ['diamond', '#E8502E'], ['cross', '#2F7BEA'],
     ['ring', '#E0A800'], ['hex', '#1FB574'], ['heart', '#0F1923'], ['moon', '#E8502E'], ['bolt', '#2F7BEA'], ['plus', '#E0A800']];
     const FACE = '#EDF2F6';
-    let cards, turn, cur, flipped, wait, got, over, endT, rep = repeater();
+    let cards, turn, cur, flipped, wait, got, over, endT, mem = {}, rep = repeater();
     function sym(g, s, x, y, r, c) {
       g.fillStyle = c; g.strokeStyle = c; g.lineWidth = r * .3; g.lineJoin = 'round'; g.lineCap = 'round'; g.beginPath();
       switch (s) {
@@ -3152,7 +3243,7 @@ registerGame({
     const pos = i => [X0 + (i % COLS) * (CW + G), Y0 + Math.floor(i / COLS) * (CH + G)];
     function flip(i) {
       const c = cards[i]; if (over || wait > 0 || c.up || c.done || flipped.length >= 2) { if (!over && (c.up || c.done)) api.beep('no'); return; }
-      c.up = true; flipped.push(i); api.beep('select');
+      c.up = true; flipped.push(i); api.beep('select'); if (rand(0, 1) < [.45, .75, .98][api.cpu | 0]) mem[i] = 1;
       if (flipped.length === 2) wait = cards[flipped[0]].sym === cards[flipped[1]].sym ? .7 : 1.1;
     }
     function resolve() {
@@ -3163,9 +3254,23 @@ registerGame({
       } else { cards[a].up = cards[b].up = false; turn = (turn + 1) % n; api.turn(turn); }
     }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || wait > 0 || turn !== i || flipped.length >= 2) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, .95) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const live = cards.map((c, k) => k).filter(k => !cards[k].done && !cards[k].up);
+        if (!live.length) return null;
+        if (flipped.length === 1) {
+          const sy = cards[flipped[0]].sym, m = live.find(k => mem[k] && cards[k].sym === sy);
+          if (m != null) { flip(m); return null; }
+        } else {
+          for (const a of live) if (mem[a]) { const b = live.find(k => k !== a && mem[k] && cards[k].sym === cards[a].sym); if (b != null) { flip(a); return null; } }
+        }
+        const unk = live.filter(k => !mem[k]), pool = unk.length ? unk : live;
+        flip(pool[rint(pool.length)]); return null;
+      },
       reset(r) {
         const ids = shuffle([...SYMS.keys(), ...SYMS.keys()]); cards = ids.map(sym => ({ sym, up: false, done: false, f: 0, owner: -1 }));
-        turn = r % n; cur = 0; flipped = []; wait = 0; got = Array(n).fill(0); over = false; endT = 0; api.turn(turn);
+        turn = r % n; cur = 0; flipped = []; wait = 0; mem = {}; got = Array(n).fill(0); over = false; endT = 0; api.turn(turn);
       },
       update(dt) {
         cards.forEach(c => { const tgt = c.up || c.done ? 1 : 0; c.f += clamp(tgt - c.f, -dt * 5, dt * 5); });
@@ -3207,7 +3312,7 @@ registerGame({
 
 /* ---------- Checkers ---------- */
 registerGame({
-  id: 'checkers', title: 'Checkers', blurb: 'Jump to capture, crown at the far edge. Captures are mandatory.',
+  id: 'checkers', cpu: true, title: 'Checkers', blurb: 'Jump to capture, crown at the far edge. Captures are mandatory.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Move the cursor to one of your pieces and press A, then pick a highlighted square. B cancels. If a capture is available you must take it, and multi-jumps must be finished.',
   icon() {
@@ -3255,7 +3360,32 @@ registerGame({
       if (pc && pc.p === turn && ms.some(m => m.fr === r && m.fc === c)) { sel = { r, c }; api.beep('select'); }
       else { if (pc && pc.p === turn) api.beep('no'); sel = null; }
     }
+    function evalMove(m, p) {
+      const save = b, sc = chain;
+      b = save.map(row => row.map(v => v && { p: v.p, k: v.k }));
+      const pc = b[m.fr][m.fc]; b[m.fr][m.fc] = null; b[m.tr][m.tc] = pc; let v = 0;
+      if (m.cap) { b[m.cap[0]][m.cap[1]] = null; v += 10; }
+      if (!pc.k && ((p === 0 && m.tr === 0) || (p === 1 && m.tr === 7))) { pc.k = true; v += 5; }
+      v += pc.k ? 0 : .25 * (p === 0 ? 7 - m.tr : m.tr);
+      if (m.tc === 0 || m.tc === 7) v += .6;
+      const more = m.cap && jumpsOf(m.tr, m.tc).length;
+      if (!more) {
+        let danger = 0;
+        for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) if (b[r][c] && b[r][c].p !== p) for (const j of jumpsOf(r, c)) if (j.cap[0] === m.tr && j.cap[1] === m.tc) danger = 1;
+        let any = 0; for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) if (b[r][c] && b[r][c].p !== p) any += jumpsOf(r, c).length;
+        v -= danger * (pc.k ? 9 : 7) + (any && !danger ? 2 : 0);
+      } else v += 3;
+      b = save; chain = sc; return v;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, 1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const ms = allMoves(turn); if (!ms.length) return null;
+        const L = api.cpu; let best = null, bs = -1e9;
+        for (const m of ms) { const v = (L === 0 ? 0 : evalMove(m, turn)) + rand(0, [6, 1.2, .2][L]); if (v > bs) { bs = v; best = m; } }
+        sel = { r: best.fr, c: best.fc }; cr = best.tr; cc = best.tc; doMove(best); return null;
+      },
       reset(r) {
         b = Array.from({ length: 8 }, () => Array(8).fill(null));
         for (let rr = 0; rr < 8; rr++) for (let c = 0; c < 8; c++) if ((rr + c) % 2) { if (rr < 3) b[rr][c] = { p: 1, k: false }; else if (rr > 4) b[rr][c] = { p: 0, k: false }; }
@@ -3298,7 +3428,7 @@ registerGame({
 
 /* ---------- Gomoku ---------- */
 registerGame({
-  id: 'gomoku', title: 'Gomoku', blurb: 'Five in a row wins. Simple rules, long fights.',
+  id: 'gomoku', cpu: true, title: 'Gomoku', blurb: 'Five in a row wins. Simple rules, long fights.',
   kind: 'turns', min: 2, max: 2, color: 2,
   help: 'Move the cursor (hold to glide) and press A to place a stone. First to line up five or more in any direction wins.',
   icon() {
@@ -3328,7 +3458,33 @@ registerGame({
       else if (placed === N * N) { over = true; endT = 1; }
       else { turn = 1 - turn; api.turn(turn); }
     }
+    function lineScore(x, y, p) {
+      let tot = 0;
+      for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+        let cnt = 1, open = 0;
+        for (const sg of [1, -1]) { let xx = x + dx * sg, yy = y + dy * sg; while (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] === p) { cnt++; xx += dx * sg; yy += dy * sg; } if (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] === -1) open++; }
+        tot += cnt >= 5 ? 100000 : cnt === 4 ? (open === 2 ? 9000 : open ? 1200 : 0) : cnt === 3 ? (open === 2 ? 700 : open ? 60 : 0) : cnt === 2 ? (open === 2 ? 50 : open ? 8 : 0) : (open ? 2 : 0);
+      }
+      return tot;
+    }
+    function pickCell() {
+      if (placed === 0) return [6, 6];
+      const L = api.cpu; let best = null, bs = -1;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        if (b[y][x] !== -1) continue; let near = false;
+        for (let dy = -2; dy <= 2 && !near; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] !== -1) { near = true; break; } }
+        if (!near) continue;
+        const v = lineScore(x, y, turn) * (L ? 1.05 : .8) + lineScore(x, y, 1 - turn) * (L === 0 ? .6 : 1) + rand(0, [900, 20, 2][L]) - Math.hypot(x - 6, y - 6) * .1;
+        if (v > bs) { bs = v; best = [x, y]; }
+      }
+      return best || [6, 6];
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.4, .9) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const [x, y] = pickCell(); cx = x; cy = y; place(x, y); return null;
+      },
       reset(r) { b = Array.from({ length: N }, () => Array(N).fill(-1)); turn = r % 2; cx = 6; cy = 6; over = false; endT = 0; win = null; last = null; placed = 0; api.turn(turn); },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(win ? b[win[0][1]][win[0][0]] : -1, win ? 'Five in a row.' : 'The board is full.'); return; }
@@ -3364,7 +3520,7 @@ registerGame({
 
 /* ---------- Throw ---------- */
 registerGame({
-  id: 'throw', title: 'Throw', blurb: 'Toss the ball into the bin. It moves every turn. Five throws each.',
+  id: 'throw', cpu: true, title: 'Throw', blurb: 'Toss the ball into the bin. It moves every turn. Five throws each.',
   kind: 'turns', min: 2, max: 2, color: 1,
   help: 'Left and right tilt your throw (hold B for fine control). Hold A to charge, release to throw. A clean swish is worth 3, a ball that drops in off the edge is 1. Five throws each.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="40" cy="86" r="12" fill="#0F1923"/><path d="M52 78C80 20 130 10 150 66" fill="none" stroke="#0F1923" stroke-width="4" stroke-dasharray="3 9" stroke-linecap="round"/><path d="M134 72h34l-5 38h-24z" fill="none" stroke="#0F1923" stroke-width="5" stroke-linejoin="round"/></svg>`; },
@@ -3372,7 +3528,22 @@ registerGame({
     const GY = 520, OX = 110, OY = 440, G = 980, col = i => api.players[i].color;
     let turn, thrown, scores, aim = makeAimer(), phase, ball, binX, over, endT, winner, res, rt, trail, anim;
     function newBin() { binX = irand(430, 860); }
+    /* where a throw crosses the bin rim line */
+    function throwX(ang, f) { const sp = 300 + f * 760; let x = OX, y = OY, vx = Math.cos(ang) * sp, vy = Math.sin(ang) * sp; const h = 1 / 90; for (let k = 0; k < 400; k++) { const py = y; vy += G * h; x += vx * h; y += vy * h; if (vy > 0 && py < GY - 70 && y >= GY - 70) return x; } return -999; }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const L = api.cpu;
+        if (!Z[i]) {
+          let best = null, bs = 1e9;
+          for (let a = -1.45; a <= -.2; a += .01) for (let f = .15; f <= 1; f += .025) { const d = Math.abs(throwX(a, f) - binX); if (d < bs) { bs = d; best = [a, f]; } }
+          best = best || [-.9, .6]; Z[i] = { a: clamp(best[0] + rand(-1, 1) * [.07, .028, .006][L], -1.45, -.2), f: clamp(best[1] + rand(-1, 1) * [.07, .03, .006][L], .1, 1), w: rand(.4, 1), st: 0 };
+        }
+        const P = Z[i];
+        if (P.st === 0) { const err = P.a - aim.ang; if (Math.abs(err) > .012) return { x: clamp(err * 6, -1, 1) }; P.w -= dt; if (P.w <= 0) P.st = 1; return null; }
+        if (P.st === 1) { if (aim.pow < P.f) return { a: true }; P.st = 2; }
+        return null;
+      },
       touch: 'Press, pull back from the thrower and let go. The farther you pull, the harder.',
       pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, OX, OY); },
       reset(r) { turn = r % 2; thrown = [0, 0]; scores = [0, 0]; phase = 'aim'; aim.reset(-.95); newBin(); over = false; endT = 0; winner = -1; res = ''; rt = 0; trail = []; anim = 0; api.turn(turn); },
@@ -3423,7 +3594,7 @@ registerGame({
 
 /* ---------- Wheelie ---------- */
 registerGame({
-  id: 'wheelie', title: 'Wheelie', blurb: 'Hold the front wheel up for turbo speed. Too high and you flip.',
+  id: 'wheelie', cpu: true, title: 'Wheelie', blurb: 'Hold the front wheel up for turbo speed. Too high and you flip.',
   kind: 'live', min: 2, max: 2, color: 0,
   help: 'Hold A to accelerate, which also lifts your front wheel. Hold B to lower it. Keep the nose between the green marks for a speed boost. Past the red mark you flip over and lose speed. First to the end wins.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><circle cx="64" cy="92" r="16"/><circle cx="136" cy="62" r="16"/><path d="M64 92l30-20h22l20-10M96 72l-8-24h20"/><path d="M30 108h60" stroke-dasharray="2 9"/></svg>`; },
@@ -3431,6 +3602,12 @@ registerGame({
     const LEN = 5200, col = i => api.players[i].color;
     let b, over, endT, winner, t;
     return {
+      ai(i, dt) {
+        const p = b[i], S = this.s || (this.s = []), st = S[i] || (S[i] = { e: 0, tm: 0 }), L = api.cpu; if (!p || over) return null;
+        st.tm -= dt; if (st.tm <= 0) { st.tm = rand(.5, 1.2); st.e = rand(-1, 1) * [14, 7, 2.5][L]; }
+        if (p.stun > 0) return { a: false, b: false };
+        const tg = 40 + st.e; return { a: p.th < tg + 4, b: p.th > tg + 14 };
+      },
       tapA: true, touch: 'Press and hold to speed up. Right-click or a second finger lowers the nose.',
       reset() { b = [0, 1].map(() => ({ x: 0, v: 0, th: 0, stun: 0, boost: false })); over = false; endT = 0; winner = -1; t = 0; },
       update(dt) {
@@ -3494,7 +3671,7 @@ registerGame({
 
 /* ---------- Stampede ---------- */
 registerGame({
-  id: 'stampede', title: 'Stampede', blurb: 'Mash A to run, press B to jump the fences. First animal home wins.',
+  id: 'stampede', cpu: true, title: 'Stampede', blurb: 'Mash A to run, press B to jump the fences. First animal home wins.',
   kind: 'live', min: 2, max: 4, color: 3,
   help: 'Tap A as fast as you can to build speed. Press B to jump a fence. Hit a fence on the ground and you stumble. Reach the end first.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M30 80c0-20 20-30 40-30h30c20 0 36 10 36 30M60 80v22M100 80v22M136 80v22M44 80v22M150 56l14-14"/><circle cx="162" cy="48" r="8"/><path d="M20 108h160" stroke-dasharray="2 9"/></svg>`; },
@@ -3503,6 +3680,13 @@ registerGame({
     let fences, an, over, endT, winner, t;
     const runT = [false, false], jmpT = [false, false], sy0 = [null, null];
     return {
+      ai(i, dt) {
+        const p = an[i], S = this.s || (this.s = []), st = S[i] || (S[i] = { ph: 0, on: false, jt: .3 }), L = api.cpu; if (!p || over) return null;
+        st.ph += dt * [9, 12.5, 16][L]; const on = Math.floor(st.ph) % 2 === 0, a = on && !st.on; st.on = on;
+        let b = false;
+        for (const f of fences) { const d = f - p.x; if (d < -10) continue; if (d > 260) break; if (d / Math.max(80, p.v) < st.jt && p.cd <= 0 && p.jump <= 0 && p.stun <= 0) { b = true; st.jt = [.22, .3, .34][L] + rand(-.05, .05) * (2 - L); } break; }
+        return { a: on, b };
+      },
       touch: 'Tap fast to run. Press and drag upward to jump a fence.',
       pointer(x, y, t, i) {
         if (t === 'down') { runT[i] = true; sy0[i] = y; }
@@ -3576,14 +3760,16 @@ registerGame({
 
 /* ---------- Animal Stack ---------- */
 registerGame({
-  id: 'animalstack', title: 'Animal Stack', blurb: 'Take turns stacking animals on the ledge. Whoever makes the pile tumble loses.',
-  kind: 'turns', min: 2, max: 2, color: 3,
-  help: 'Slide the animal with left and right, then press A to drop it. It lands on top of the pile. Place it so the weight stays balanced. If the pile topples, or the animal misses the ledge, you lose.',
+  id: 'animalstack', cpu: true, title: 'Animal Stack', blurb: 'Take turns stacking animals on the ledge. Whoever makes the pile tumble loses.',
+  kind: 'turns', min: 2, max: 4, color: 3,
+  help: 'Slide the animal with left and right, then press A to drop it. It lands on top of the pile. Place it so the weight stays balanced. If the pile topples, or the animal misses the ledge, you are out. With three or four players the pile resets and the last one standing wins.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linejoin="round"><rect x="62" y="82" width="76" height="26" rx="8" fill="#0F1923"/><rect x="74" y="54" width="52" height="28" rx="8"/><rect x="82" y="26" width="36" height="28" rx="8" fill="#0F1923"/><path d="M86 26l-4-10 10 6M114 26l4-10-10 6"/></svg>`; },
   create(api) {
     const PX = 340, PW = 280, GY = 500, col = i => api.players[i].color;
     const TYPES = [[96, 50, '#FF8F5C', 'cat'], [64, 64, '#7FD6FF', 'owl'], [120, 42, '#B8E986', 'croc'], [52, 84, '#FFD166', 'giraffe'], [84, 70, '#D4A5FF', 'hippo'], [104, 56, '#FF6B8A', 'pig']];
-    let blocks, turn, nextT, hx, phase, cur, over, endT, winner, cam, loser, fall, anim, msg;
+    let blocks, turn, nextT, hx, phase, cur, over, endT, winner, cam, loser, fall, anim, msg, alive, rT; const n = api.n;
+    const nextAlive = () => { let k = turn; for (let j = 0; j < n; j++) { k = (k + 1) % n; if (alive[k]) break; } return k; };
+    function lose(m, et) { alive[turn] = false; const left = alive.map((a, k) => a ? k : -1).filter(k => k >= 0); if (left.length <= 1) { over = true; endT = et; winner = left.length ? left[0] : -1; msg = m; phase = 'over'; } else { phase = 'reset'; rT = Math.max(et, 1.3); msg = api.players[turn].name + ' is out'; } }
     const topOf = () => blocks.reduce((m, b) => Math.min(m, b.y), GY);
     const supporters = b => [{ x: PX, y: GY, w: PW, h: 40, plat: true }].concat(blocks).filter(s => s !== b && Math.abs(s.y - (b.y + b.h)) < .6 && s.x < b.x + b.w && s.x + s.w > b.x);
     function stable() {
@@ -3605,23 +3791,50 @@ registerGame({
       if (!hit) { loser = turn; phase = 'miss'; fall = { x, y: topOf() - 160, w, h, vy: 0, c: T[2] }; api.beep('die'); return; }
       cur = { x, y: topOf() - 160 - h, w, h, c: T[2], k: T[3], land: top - h, v: 0 }; phase = 'drop';
     }
+    function tryPlace(T, cx) {
+      const w = T[0], h = T[1], x = cx - w / 2; let top = GY, hit = false;
+      if (x < PX + PW && x + w > PX) hit = true;
+      for (const b of blocks) if (x < b.x + b.w && x + w > b.x) { top = Math.min(top, b.y); hit = true; }
+      if (!hit) return false;
+      const blk = { x, y: top - h, w, h }; blocks.push(blk); const ok = stable(); if (!ok) { blocks.pop(); return false; } return blk;
+    }
+    function planDrop() {
+      const L = api.cpu, T = TYPES[nextT], cands = [];
+      for (let cx = 180; cx <= 780; cx += 20) { const blk = tryPlace(T, cx); if (blk) { let hard = 0; if (L === 2) { for (const T2 of TYPES) for (let c2 = 180; c2 <= 780; c2 += 30) { const b2 = tryPlace(T2, c2); if (b2) { blocks.pop(); hard++; } } } blocks.pop(); cands.push({ cx, hard }); } }
+      if (!cands.length || L === 0 && rand(0, 1) < .3) return rand(190, 770);
+      if (L === 2) { cands.sort((a, b) => a.hard - b.hard); return cands[rint(Math.min(3, cands.length))].cx; }
+      return cands[rint(cands.length)].cx;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const z = Z[i] || (Z[i] = { tgt: planDrop(), w: rand(.5, 1.1), held: false });
+        if (z.held) { z.held = false; return null; }
+        const err = z.tgt - hx;
+        if (Math.abs(err) > 7) return { x: clamp(err / 40, -1, 1) };
+        z.w -= dt; if (z.w <= 0) { z.held = true; return { a: true }; } return null;
+      },
       dragAxes: 'x', dragFire: 'release', drag: () => ({ x: hx, y: 0 }),
-      reset(r) { blocks = []; turn = r % 2; hx = 480; phase = 'aim'; over = false; endT = 0; winner = -1; cam = 0; loser = -1; fall = null; anim = 0; msg = ''; newPiece(); api.turn(turn); },
+      reset(r) { blocks = []; alive = Array(n).fill(true); rT = 0; turn = r % n; hx = 480; phase = 'aim'; over = false; endT = 0; winner = -1; cam = 0; loser = -1; fall = null; anim = 0; msg = ''; newPiece(); api.turn(turn); },
       update(dt) {
         anim += dt; const want = Math.max(0, 260 - topOf()); cam += (want - cam) * Math.min(1, dt * 4);
         if (over) { endT -= dt; if (fall) { fall.vy += 1200 * dt; fall.y += fall.vy * dt; } for (const b of blocks) if (b.tum) { b.vy += 1100 * dt; b.y += b.vy * dt; b.x += b.vx * dt; b.r += b.vr * dt; } if (endT <= 0) api.endRound(winner, msg); return; }
         if (phase === 'aim') { const s = api.input(turn); hx = clamp(s.ph ? s.px : hx + s.x * 340 * dt, 180, 780); if (s.pa) drop(); }
         else if (phase === 'drop') {
           cur.v += 1500 * dt; cur.y += cur.v * dt; if (cur.y >= cur.land) { cur.y = cur.land; blocks.push(cur); api.beep('place'); cur = null;
-            if (!stable()) { loser = turn; phase = 'over'; over = true; endT = 1.7; winner = 1 - turn; msg = 'The pile toppled.'; api.beep('die'); const cx = blocks.reduce((a, b) => a + b.x + b.w / 2, 0) / blocks.length; blocks.forEach((b, i) => { b.tum = true; b.vy = -80 - (i % 3) * 30; b.vx = (b.x + b.w / 2 < cx ? -1 : 1) * (60 + (i % 4) * 40); b.vr = (i % 2 ? 1 : -1) * (1 + (i % 3) * .5); b.r = 0; }); }
-            else { turn = 1 - turn; api.turn(turn); newPiece(); phase = 'aim'; } }
+            if (!stable()) { loser = turn; api.beep('die'); const cx = blocks.reduce((a, b) => a + b.x + b.w / 2, 0) / blocks.length; blocks.forEach((b, i) => { b.tum = true; b.vy = -80 - (i % 3) * 30; b.vx = (b.x + b.w / 2 < cx ? -1 : 1) * (60 + (i % 4) * 40); b.vr = (i % 2 ? 1 : -1) * (1 + (i % 3) * .5); b.r = 0; }); lose('The pile toppled.', 1.7); }
+            else { turn = nextAlive(); api.turn(turn); newPiece(); phase = 'aim'; } }
         } else if (phase === 'miss') {
-          fall.vy += 1500 * dt; fall.y += fall.vy * dt; if (fall.y > 640) { over = true; endT = .6; winner = 1 - turn; msg = 'The animal missed the ledge.'; phase = 'over'; }
+          fall.vy += 1500 * dt; fall.y += fall.vy * dt; if (fall.y > 640) lose('The animal missed the ledge.', .6);
+        } else if (phase === 'reset') {
+          if (fall) { fall.vy += 1200 * dt; fall.y += fall.vy * dt; } for (const b of blocks) if (b.tum) { b.vy += 1100 * dt; b.y += b.vy * dt; b.x += b.vx * dt; b.r += b.vr * dt; }
+          rT -= dt; if (rT <= 0) { blocks = []; fall = null; cam = 0; turn = nextAlive(); api.turn(turn); newPiece(); phase = 'aim'; }
         }
       },
       draw(g) {
         D.text(g, over ? api.players[winner].name + ' wins' : api.players[turn].name + "'s animal", W / 2, 36, 32, over ? SCR.fg : col(turn));
+        if (phase === 'reset') D.text(g, msg, W / 2, 76, 22, '#FFC933');
+        if (n > 2) for (let i = 0; i < n; i++) D.text(g, api.players[i].name + (alive[i] ? '' : ' (out)'), 90 + i * 130, 580, 15, alive[i] ? col(i) : SCR.dim, 'left', 700);
         const animal = (b, i) => {
           g.save(); g.translate(b.x + b.w / 2, b.y + b.h / 2 + cam); if (b.r) g.rotate(b.r); g.fillStyle = b.c; g.strokeStyle = 'rgba(15,25,35,.55)'; g.lineWidth = 3; D.rr(g, -b.w / 2, -b.h / 2, b.w, b.h, 12); g.fill(); g.stroke();
           g.fillStyle = '#10161C'; D.disc(g, -b.w * .18, -b.h * .1, 3.5, '#10161C'); D.disc(g, b.w * .18, -b.h * .1, 3.5, '#10161C'); g.strokeStyle = '#10161C'; g.lineWidth = 2.5; g.beginPath(); g.arc(0, b.h * .12, 7, .2, Math.PI - .2); g.stroke();
@@ -3639,7 +3852,7 @@ registerGame({
 
 /* ---------- Crash It ---------- */
 registerGame({
-  id: 'crashit', title: 'Crash It', blurb: 'Bumper cars with real damage. Ram your rivals before they ram you.',
+  id: 'crashit', cpu: true, title: 'Crash It', blurb: 'Bumper cars with real damage. Ram your rivals before they ram you.',
   kind: 'live', min: 2, max: 4, color: 1,
   help: 'Steer with left and right, hold A to drive and B to brake or reverse. Hard hits cost health, and so do walls. Last car running wins.',
   icon() { return `<svg viewBox="0 0 200 125"><rect x="30" y="50" width="62" height="30" rx="10" fill="#0F1923" transform="rotate(-12 61 65)"/><rect x="108" y="56" width="62" height="30" rx="10" fill="none" stroke="#0F1923" stroke-width="5" transform="rotate(12 139 71)"/><path d="M96 56l-8-14M104 62l12-14M96 70l-4-18" stroke="#0F1923" stroke-width="4" stroke-linecap="round"/></svg>`; },
@@ -3647,6 +3860,14 @@ registerGame({
     const AX = 90, AY = 86, AW = 780, AH = 470, CR = 22, n = api.n, col = i => api.players[i].color;
     let cars, over, endT, winner, t, sparks, anim, msg;
     return {
+      ai(i, dt) {
+        const c = cars[i]; if (!c || !c.alive || over) return null; const L = api.cpu, S = this.s || (this.s = []), st = S[i] || (S[i] = { k: 0, tm: 0 });
+        st.tm -= dt; if (st.tm <= 0) { st.tm = rand(.4, 1.1); let bd = 1e9, bk = -1; cars.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.hypot(o.x - c.x, o.y - c.y) + rand(0, [250, 100, 20][L]); if (d < bd) { bd = d; bk = k; } } }); st.k = bk; }
+        const o = cars[st.k]; if (!o || !o.alive) { st.tm = 0; return { ptr: { x: AX + AW / 2, y: AY + AH / 2, down: false } }; }
+        const lead = [.1, .25, .4][L]; let tx = o.x + o.vx * lead, ty = o.y + o.vy * lead;
+        if (c.hp < 28 && L > 0) { tx = clamp(c.x + (c.x - o.x), AX + 80, AX + AW - 80); ty = clamp(c.y + (c.y - o.y), AY + 80, AY + AH - 80); }
+        return { ptr: { x: clamp(tx, AX + 30, AX + AW - 30), y: clamp(ty, AY + 30, AY + AH - 30), down: false } };
+      },
       pointerRaw: true, touch: 'Your car chases your finger or mouse. Keep it close to brake.',
       reset() {
         const sp = [[.2, .25, 0.4], [.8, .75, 3.5], [.8, .25, 2.7], [.2, .75, 0.7]]; cars = []; for (let i = 0; i < n; i++) cars.push({ x: AX + AW * sp[i][0], y: AY + AH * sp[i][1], vx: 0, vy: 0, ang: sp[i][2], hp: 100, alive: true });
@@ -3701,7 +3922,7 @@ registerGame({
 
 /* ---------- Golf Football ---------- */
 registerGame({
-  id: 'golffoot', title: 'Golf Football', blurb: 'One ball, two goals. Take turns kicking it from where it lies. First to three goals.',
+  id: 'golffoot', cpu: true, title: 'Golf Football', blurb: 'One ball, two goals. Take turns kicking it from where it lies. First to three goals.',
   kind: 'turns', min: 2, max: 2, color: 2,
   help: 'Left and right aim (hold B for fine aim), hold A to charge and release to kick. You attack the goal on the far side from your colour. Own goals count for your rival. First to three wins, and fourteen kicks ends it.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><rect x="24" y="22" width="152" height="82" rx="6"/><path d="M24 48v30M176 48v30"/><circle cx="100" cy="63" r="12" fill="#0F1923"/><path d="M116 58c18-6 34-8 46-4" stroke-dasharray="3 8"/></svg>`; },
@@ -3712,7 +3933,35 @@ registerGame({
     const target = () => turn === 0 ? [X0 + FW, CYF] : [X0, CYF];
     function aimTo() { const t = target(); aim.ang = Math.atan2(t[1] - ball.y, t[0] - ball.x); }
     function reset0() { ball = { x: X0 + FW / 2, y: CYF, vx: 0, vy: 0 }; }
+    function simKick(ang, f) {
+      const b = { x: ball.x, y: ball.y, vx: Math.cos(ang) * (120 + f * 980), vy: Math.sin(ang) * (120 + f * 980) }, dt = 1 / 60, n = 5, h = dt / n;
+      for (let k = 0; k < 840; k++) {
+        for (let s = 0; s < n; s++) {
+          b.x += b.vx * h; b.y += b.vy * h; const inG = Math.abs(b.y - CYF) < GH / 2 - 2;
+          if (b.x < X0 + BR) { if (inG) { if (b.x < X0 - 6) return { goal: 1, x: b.x, y: b.y }; } else { b.x = X0 + BR; b.vx = Math.abs(b.vx) * .8; } }
+          if (b.x > X0 + FW - BR) { if (inG) { if (b.x > X0 + FW + 6) return { goal: 0, x: b.x, y: b.y }; } else { b.x = X0 + FW - BR; b.vx = -Math.abs(b.vx) * .8; } }
+          if (b.y < Y0 + BR) { b.y = Y0 + BR; b.vy = Math.abs(b.vy) * .8; } if (b.y > Y0 + FH - BR) { b.y = Y0 + FH - BR; b.vy = -Math.abs(b.vy) * .8; }
+          for (const u of BUMP) { const dx = b.x - u[0], dy = b.y - u[1], d = Math.hypot(dx, dy); if (d < u[2] + BR) { const nx = dx / d, ny = dy / d; b.x = u[0] + nx * (u[2] + BR); b.y = u[1] + ny * (u[2] + BR); const vn = b.vx * nx + b.vy * ny; if (vn < 0) { b.vx -= 1.9 * vn * nx; b.vy -= 1.9 * vn * ny; } } }
+        }
+        const fr = Math.exp(-1.1 * dt); b.vx *= fr; b.vy *= fr; const sp = Math.hypot(b.vx, b.vy); if (sp < 7) break; const kk = Math.max(0, sp - 26 * dt) / sp; b.vx *= kk; b.vy *= kk;
+      }
+      return { goal: -1, x: b.x, y: b.y };
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const L = api.cpu;
+        if (!Z[i]) {
+          const tg = target(); let best = null, bs = 1e9;
+          for (let a = -Math.PI; a < Math.PI; a += .045) for (let f = .15; f <= 1; f += .05) {
+            const r = simKick(a, f); let sc = Math.hypot(r.x - tg[0], r.y - tg[1]) * .5;
+            if (r.goal === i) sc = -1000 - f * 5; else if (r.goal >= 0) sc = 1000;
+            sc += rand(0, 4); if (sc < bs) { bs = sc; best = [a, f]; }
+          }
+          best = best || [aim.ang, .7]; Z[i] = { a: best[0] + rand(-1, 1) * [.09, .03, .008][L], f: clamp(best[1] + rand(-1, 1) * [.12, .05, .01][L], .12, 1), w: rand(.4, 1), st: 0 };
+        }
+        return aimDrive(Z[i], aim, dt);
+      },
       touch: 'Press, pull back from the ball and let go to kick. The farther you pull, the harder.',
       pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, ball.x, ball.y); },
       reset(r) { reset0(); turn = r % 2; phase = 'aim'; score = [0, 0]; kicks = 0; over = false; endT = 0; winner = -1; note = ''; noteT = 0; rt = 0; aim.reset(0); aimTo(); api.turn(turn); },
@@ -4254,7 +4503,7 @@ registerGame({
 
 /* ---------- Penalty Kicks ---------- */
 registerGame({
-  id: 'penalty', title: 'Penalty Kicks', blurb: 'Shooter and keeper pick a corner at the same time. Five kicks each.',
+  id: 'penalty', cpu: true, title: 'Penalty Kicks', blurb: 'Shooter and keeper pick a corner at the same time. Five kicks each.',
   kind: 'live', min: 2, max: 2, color: 3,
   help: 'Both players choose with the stick: left, centre or right, and high or low. Press A to lock in. Roles swap every kick. High corners can sail wide.',
   icon() {
@@ -4273,6 +4522,15 @@ registerGame({
     }
     function fresh() { sel = [{ c: 1, r: 1, lock: false }, { c: 1, r: 1, lock: false }]; phase = 'choose'; t = 0; res = ''; }
     return {
+      ai(i, dt) {
+        const S = this.s || (this.s = []), st = S[i] || (S[i] = { d: null }), L = api.cpu;
+        if (phase !== 'choose' || over || !sel[i] || sel[i].lock) { st.d = null; return null; }
+        if (st.d == null) st.d = rand(.5, 1.2) + [.5, .2, 0][L];
+        st.d -= dt; if (st.d > 0) return null;
+        const c = sel[i]; if (i === shooter()) { c.c = [0, 2, 1, 0, 2][irand(0, 4)]; c.r = rand() < [.4, .55, .7][L] ? 1 : 0; if (L === 2 && c.c === 1) c.c = rand() < .5 ? 0 : 2; }
+        else { c.c = irand(0, 2); c.r = irand(0, 1); }
+        c.lock = true; api.beep('select'); return null;
+      },
       pointer(x, y, t, i) {
         if (t !== 'down' || phase !== 'choose' || over || !sel[i] || sel[i].lock) return;
         const px = i ? 735 : 30, py = 410;
@@ -4452,17 +4710,17 @@ registerGame({
 /* ---------- Reflex Race ---------- */
 registerGame({
   id: 'reflex', cpu: true, title: 'Reflex Race', blurb: 'A button appears. Press that exact one first. Wrong press and you are frozen.',
-  kind: 'live', min: 2, max: 2, color: 2,
-  help: 'When the prompt shows up, press the matching control on your own keys: A, B or a direction. Pressing early or wrong locks you out for a moment. First to five.',
+  kind: 'live', min: 2, max: 4, color: 2,
+  help: 'When the prompt shows up, press the matching control on your own keys: A, B or a direction. Pressing early or wrong locks you out for a moment. First to five. Up to four players.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><circle cx="100" cy="62" r="42"/><path d="M100 36v26l18 12"/><path d="M60 14l-10-8M140 14l10-8"/></svg>`;
   },
   create(api) {
-    const col = i => api.players[i].color, TO = 5;
+    const col = i => api.players[i].color, TO = 5, N = () => api.players.length, pcx = i => W * (i + .5) / N(), pw = () => Math.min(300, W / N() - 14), sc = () => pw() / 300;
     const PROMPTS = [['A', 'pa'], ['B', 'pb'], ['LEFT', 'pl'], ['RIGHT', 'pr'], ['UP', 'pu'], ['DOWN', 'pd']];
     let ph, t, cur, pts, lockT, winner, flash, endT;
-    function nextWait() { ph = 'wait'; t = rand(1, 3); cur = irand(0, PROMPTS.length - 1); lockT = [0, 0]; winner = -1; flash = [0, 0]; }
-    const kp = [-1, -1], padRect = (i, k) => [(i ? 720 : 240) - 135 + (k % 3) * 92, k < 3 ? 432 : 486, 86, 46];
+    function nextWait() { ph = 'wait'; t = rand(1, 3); cur = irand(0, PROMPTS.length - 1); lockT = api.players.map(() => 0); winner = -1; flash = api.players.map(() => 0); }
+    const kp = [-1, -1, -1, -1], padRect = (i, k) => { const q = sc(), cw = 92 * q; return [pcx(i) - 135 * q + (k % 3) * cw, k < 3 ? 432 : 486, 86 * q, 46]; };
     return {
       pointer(x, y, t, i) {
         if (t !== 'down') return;
@@ -4476,15 +4734,15 @@ registerGame({
         if (S.d <= 0 && lockT[i] <= 0) { kp[i] = rand() < [.25, .08, 0][L] ? (cur + 1 + irand(0, 4)) % 6 : cur; S.d = 99; }
         return null;
       },
-      reset() { pts = [0, 0]; endT = 0; nextWait(); },
+      reset() { pts = api.players.map(() => 0); endT = 0; nextWait(); },
       update(dt) {
-        for (let i = 0; i < 2; i++) { lockT[i] = Math.max(0, lockT[i] - dt); flash[i] = Math.max(0, flash[i] - dt); }
+        for (let i = 0; i < N(); i++) { lockT[i] = Math.max(0, lockT[i] - dt); flash[i] = Math.max(0, flash[i] - dt); }
         if (ph === 'wait') {
           t -= dt; if (t <= 0) { ph = 'go'; t = 0; api.beep('go'); }
         } else if (ph === 'go') t += dt;
-        else if (ph === 'result') { t -= dt; if (t <= 0) { if (pts[0] >= TO || pts[1] >= TO) { api.endRound(pts[0] > pts[1] ? 0 : 1, `${pts[0]} to ${pts[1]}.`); ph = 'done'; } else nextWait(); } }
+        else if (ph === 'result') { t -= dt; if (t <= 0) { if (pts.some(v => v >= TO)) { api.endRound(pts.indexOf(Math.max(...pts)), pts.join(' to ') + '.'); ph = 'done'; } else nextWait(); } }
         if (ph === 'wait' || ph === 'go') {
-          for (let i = 0; i < 2; i++) {
+          for (let i = 0; i < N(); i++) {
             const tp = kp[i]; kp[i] = -1;
             if (lockT[i] > 0) continue; const s = api.input(i);
             const any = s.pa || s.pb || s.pl || s.pr || s.pu || s.pd || tp >= 0; if (!any) continue;
@@ -4500,10 +4758,10 @@ registerGame({
         D.text(g, ph === 'wait' ? 'Wait for it' : ph === 'go' ? 'Now' : winner >= 0 ? api.players[winner].name + ' wins the point' : '', W / 2, 60, 36, ph === 'result' && winner >= 0 ? col(winner) : SCR.fg);
         D.rr(g, W / 2 - 200, 110, 400, 220, 28); g.fillStyle = go ? '#173A33' : '#16293A'; g.fill(); g.strokeStyle = go ? '#3DDC97' : SCR.soft; g.lineWidth = 5; g.stroke();
         D.text(g, go ? PROMPTS[cur][0] : '. . .', W / 2, 220, go ? 84 : 60, go ? '#3DDC97' : SCR.soft);
-        for (let i = 0; i < 2; i++) {
-          const x = i ? 720 : 240, locked = lockT[i] > 0;
-          g.globalAlpha = locked ? .45 : 1; D.rr(g, x - 150, 340, 300, 205, 18); g.fillStyle = col(i); g.fill(); g.globalAlpha = 1;
-          D.text(g, api.players[i].name + '  ' + pts[i], x, 378, 30, SCR.bg);
+        for (let i = 0; i < N(); i++) {
+          const x = pcx(i), PWd = pw(), locked = lockT[i] > 0;
+          g.globalAlpha = locked ? .45 : 1; D.rr(g, x - PWd / 2, 340, PWd, 205, 18); g.fillStyle = col(i); g.fill(); g.globalAlpha = 1;
+          D.text(g, api.players[i].name + '  ' + pts[i], x, 378, N() > 2 ? 22 : 30, SCR.bg);
           if (locked) D.text(g, 'FROZEN', x, 410, 16, SCR.bg, 'center', 700);
           for (let k = 0; k < 6; k++) { const [rx, ry, rw, rh] = padRect(i, k); g.fillStyle = 'rgba(15,25,35,.22)'; D.rr(g, rx, ry, rw, rh, 10); g.fill(); D.text(g, PROMPTS[k][0], rx + rw / 2, ry + rh / 2 + 6, 17, SCR.bg, 'center', 700); }
         }
@@ -4575,13 +4833,13 @@ registerGame({
 /* ---------- Tug of War ---------- */
 registerGame({
   id: 'tug', cpu: true, title: 'Tug of War', blurb: 'Mash A. Pull the rope your way.',
-  kind: 'live', min: 2, max: 2, color: 3,
-  help: 'Tap A as fast as you can. Every press drags the flag toward you. B steadies you for a small bonus on the next press.',
+  kind: 'live', min: 2, max: 4, color: 3,
+  help: 'Tap A as fast as you can. Every press drags the flag toward you. B steadies you for a small bonus on the next press. With 3 or 4 players it is a team game: players 1 and 3 pull against 2 and 4.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><path d="M22 70h156"/><path d="M100 70v-30l22 10-22 10" fill="#0F1923"/><circle cx="42" cy="46" r="10" fill="#0F1923"/><circle cx="158" cy="46" r="10" fill="#0F1923"/><path d="M42 56v30M158 56v30"/></svg>`;
   },
   create(api) {
-    const col = i => api.players[i].color;
+    const col = i => api.players[i].color, n = api.n, tm = i => i % 2, tsz = [Math.ceil(n / 2), Math.floor(n / 2)];
     let pos, over, endT, bonus;
     return {
       tapA: true,
@@ -4590,13 +4848,13 @@ registerGame({
         if (S.t <= 0) { S.on = !S.on; S.t = [.16, .1, .07][L] * (.8 + rand(0, .4)); }
         return { a: S.on };
       },
-      reset() { pos = 0; over = false; endT = 0; bonus = [0, 0]; },
+      reset() { pos = 0; over = false; endT = 0; bonus = Array(n).fill(0); },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(pos < 0 ? 0 : 1, 'Pulled across the line.'); return; }
-        for (let i = 0; i < 2; i++) {
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(pos < 0 ? 0 : 1, n > 2 ? 'The team pulled it across the line.' : 'Pulled across the line.'); return; }
+        for (let i = 0; i < n; i++) {
           const s = api.input(i); bonus[i] = Math.max(0, bonus[i] - dt);
           if (s.pb) bonus[i] = .5;
-          if (s.pa) { pos += (i ? 1 : -1) * (.034 + (bonus[i] > 0 ? .012 : 0)); bonus[i] = 0; api.beep('wall'); }
+          if (s.pa) { pos += (tm(i) ? 1 : -1) * (.034 + (bonus[i] > 0 ? .012 : 0)) * (tsz[tm(i)] > 1 ? .62 : 1); bonus[i] = 0; api.beep('wall'); }
         }
         pos = clamp(pos, -1, 1) * (1 - .25 * dt * 0); if (Math.abs(pos) >= 1) { over = true; endT = .9; api.beep('win'); }
       },
@@ -4611,44 +4869,47 @@ registerGame({
         for (let k = 0; k < 12; k++) { g.fillStyle = k % 2 ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.05)'; g.fillRect(k * 80, gy, 80, H - gy); }
         g.fillStyle = '#6B4A2E'; g.beginPath(); g.ellipse(W / 2, gy + 70, 170, 26, 0, 0, TAU); g.fill(); g.fillStyle = '#7C5A3A'; g.beginPath(); g.ellipse(W / 2, gy + 66, 150, 18, 0, 0, TAU); g.fill();
         for (let i = 0; i < 2; i++) { g.fillStyle = i ? 'rgba(76,154,255,.28)' : 'rgba(255,107,74,.28)'; g.fillRect(i ? W - 120 : 0, gy, 120, H - gy); g.fillStyle = col(i); g.fillRect(i ? W - 54 : 52, gy - 120, 4, 120); g.beginPath(); g.moveTo(i ? W - 54 : 56, gy - 120); g.lineTo(i ? W - 100 : 102, gy - 104); g.lineTo(i ? W - 54 : 56, gy - 88); g.fill(); }
-        const ry = gy + 20 - 82, p0 = 205 + pos * 110, p1 = W - 205 + pos * 110;
-        const pulling = [Math.abs(Math.sin(T * 13)), Math.abs(Math.sin(T * 13 + 1.6))];
-        for (let i = 0; i < 2; i++) Art.shadow(g, i ? p1 : p0, gy + 22, 38, 9, .3);
+        const ry = gy + 20 - 82, BASE = n > 2 ? 250 : 205, AMP = n > 2 ? 100 : 110, SPC = 88, IDX = Array.from({ length: n }, (_, i) => i);
+        const px = IDX.map(i => tm(i) ? W - BASE + pos * AMP + Math.floor(i / 2) * SPC : BASE + pos * AMP - Math.floor(i / 2) * SPC), fcs = IDX.map(i => tm(i) ? -1 : 1), p0 = px[0], p1 = px[1];
+        const pulling = IDX.map(i => Math.abs(Math.sin(T * 13 + i * 1.6)));
+        for (const i of IDX) Art.shadow(g, px[i], gy + 22, 38, 9, .3);
         /* characters grip the rope with real hands: each arm is solved so the fist lands on the rope line, and the
            rope is drawn from the hand positions, so the rope and the hands can never drift apart */
-        const px = [p0, p1], fcs = [1, -1], chars = [0, 1].map(i => !over && api.players[i].char && Roster.has(api.players[i].char));
-        const tugOv = [0, 1].map(i => {
+        const chars = IDX.map(i => !over && api.players[i].char && Roster.has(api.players[i].char));
+        const tugOv = IDX.map(i => {
           if (!chars[i]) return null;
-          const lean = -(.14 + pulling[i] * .08 + (bonus[i] > 0 ? .05 : 0) + ((i ? pos > 0 : pos < 0) ? .04 : 0));
+          const lean = -(.14 + pulling[i] * .08 + (bonus[i] > 0 ? .05 : 0) + ((tm(i) ? pos > 0 : pos < 0) ? .04 : 0));
           /* both fists on the rope: near hand ahead, far hand a little behind it; the elbows bend on their own */
           return { bob: -pulling[i] * 2, rot: lean, mouth: 'grin', ik: { near: { x: px[i] + fcs[i] * 70, y: ry }, far: { x: px[i] + fcs[i] * 30, y: ry } } };
         });
         /* seats without a chosen character pull as suited office workers: real elbows, both fists on the rope */
         const offP = i => {
-          const f = fcs[i], win = over && ((pos < 0) === (i === 0)), lose = over && !win, pl = pulling[i];
-          return { x: px[i], y: gy + 24, s: 1.1, face: f, suit: i ? '#34406A' : '#3A3F58', trousers: i ? '#262B44' : '#2A2D40', tie: col(i), hair: i ? '#C9A640' : '#7A4A2E', hairStyle: i ? 'curly' : 'swoop', skin: i ? '#F0C79E' : '#E2B089', sweat: i === 1,
+          const f = fcs[i], win = over && ((pos < 0) === (tm(i) === 0)), lose = over && !win, pl = pulling[i];
+          return { x: px[i], y: gy + 24, s: 1.1, face: f, suit: tm(i) ? '#34406A' : '#3A3F58', trousers: tm(i) ? '#262B44' : '#2A2D40', tie: col(i), hair: [ '#7A4A2E', '#C9A640', '#3A2A20', '#B5651D'][i], hairStyle: tm(i) ? 'curly' : 'swoop', skin: [ '#E2B089', '#F0C79E', '#C48C64', '#F2D2B0'][i], sweat: tm(i) === 1,
             lean: lose ? -.7 : win ? .04 : -(.2 + pl * .07 + (bonus[i] > 0 ? .04 : 0)), tilt: lose ? -.55 : 0, pull: win || lose ? 0 : pl, mood: win ? 'happy' : lose ? 'ouch' : 'grit', legs: win ? { bx: -14, fx: 14 } : lose ? { bx: -30, fx: 10 } : { bx: -34 - pl * 3, fx: 28 },
             ik: win ? { near: { x: px[i] + f * 22, y: gy - 188 }, far: { x: px[i] - f * 10, y: gy - 182 } } : lose ? { near: { x: px[i] - f * 70, y: gy - 20 }, far: { x: px[i] - f * 50, y: gy - 50 } } : { near: { x: px[i] + f * 60, y: ry }, far: { x: px[i] + f * 40, y: ry } } };
         };
-        const oh = [0, 1].map(i => chars[i] || over ? null : Art.officeHands(offP(i)));
-        const hd = [0, 1].map(i => tugOv[i] ? Roster.hands(api.players[i], px[i], gy + 24, 1.25, 'hold', fcs[i], tugOv[i]) : null);
-        g.save(); const e0 = hd[0] ? hd[0].near.hand : oh[0] ? oh[0].near : { x: p0 + 46, y: ry }, e1 = hd[1] ? hd[1].near.hand : oh[1] ? oh[1].near : { x: p1 - 46, y: ry }, sag = 5 + (1 - Math.abs(pos)) * 4, mx = (e0.x + e1.x) / 2, my = (e0.y + e1.y) / 2 + sag;
-        const rope = () => { g.beginPath(); g.moveTo(e0.x, e0.y); g.quadraticCurveTo(mx, my, e1.x, e1.y); };
+        const oh = IDX.map(i => chars[i] || over ? null : Art.officeHands(offP(i)));
+        const hd = IDX.map(i => tugOv[i] ? Roster.hands(api.players[i], px[i], gy + 24, 1.25, 'hold', fcs[i], tugOv[i]) : null);
+        g.save();
+        const hp = IDX.map(i => hd[i] ? hd[i].near.hand : oh[i] ? oh[i].near : { x: px[i] + fcs[i] * 46, y: ry }).sort((a, c) => a.x - c.x);
+        const sagMid = 5 + (1 - Math.abs(pos)) * 4, segs = [];
+        for (let k = 0; k + 1 < hp.length; k++) { const inner = k === tsz[0] - 1; segs.push({ a: hp[k], b: hp[k + 1], my: (hp[k].y + hp[k + 1].y) / 2 + (inner ? sagMid : 1.5) }); }
+        const rope = () => { g.beginPath(); g.moveTo(hp[0].x, hp[0].y); for (const s of segs) g.quadraticCurveTo((s.a.x + s.b.x) / 2, s.my, s.b.x, s.b.y); };
         g.strokeStyle = '#7A5C34'; g.lineWidth = 11; g.lineCap = 'round'; rope(); g.stroke();
         g.strokeStyle = '#D4B079'; g.lineWidth = 8; rope(); g.stroke();
-        g.strokeStyle = 'rgba(110,80,40,.7)'; g.lineWidth = 2; g.beginPath(); for (let x = e0.x + 6; x < e1.x; x += 11) { const k = (x - e0.x) / (e1.x - e0.x), yy = (1 - k) * (1 - k) * e0.y + 2 * k * (1 - k) * my + k * k * e1.y; g.moveTo(x, yy - 4); g.lineTo(x + 6, yy + 4); } g.stroke(); g.restore();
+        g.strokeStyle = 'rgba(110,80,40,.7)'; g.lineWidth = 2; g.beginPath();
+        for (const s of segs) for (let x = s.a.x + 6; x < s.b.x; x += 11) { const k = (x - s.a.x) / (s.b.x - s.a.x), yy = (1 - k) * (1 - k) * s.a.y + 2 * k * (1 - k) * s.my + k * k * s.b.y; g.moveTo(x, yy - 4); g.lineTo(x + 6, yy + 4); }
+        g.stroke(); g.restore();
         const tone = ['#E8553B', '#4C9AFF'];
-        const tugPose = i => over ? ((pos < 0) === (i === 0) ? 'cheer' : 'ouch') : 'run';
-        if (!Roster.stand(g, api.players[0], p0, gy + 24, 1.25, tugOv[0] ? 'hold' : tugPose(0), 1, false, tugOv[0] || undefined)) {
-          Art.office(g, offP(0));
-        }
-        if (!Roster.stand(g, api.players[1], p1, gy + 24, 1.25, tugOv[1] ? 'hold' : tugPose(1), -1, false, tugOv[1] || undefined)) {
-          Art.office(g, offP(1));
+        const tugPose = i => over ? ((pos < 0) === (tm(i) === 0) ? 'cheer' : 'ouch') : 'run';
+        for (const i of IDX.slice().sort((a, c) => Math.floor(c / 2) - Math.floor(a / 2))) {
+          if (!Roster.stand(g, api.players[i], px[i], gy + 24, 1.25, tugOv[i] ? 'hold' : tugPose(i), fcs[i], false, tugOv[i] || undefined)) Art.office(g, offP(i));
         }
         g.fillStyle = '#fff'; g.fillRect(mid - 2, ry - 26, 4, 22); g.fillStyle = Art.lin(g, mid, 0, mid + 40, 0, ['#FFE36B', '#FFC933']); g.beginPath(); g.moveTo(mid + 2, ry - 26); g.lineTo(mid + 44, ry - 16); g.lineTo(mid + 2, ry - 6); g.closePath(); g.fill();
         g.fillStyle = 'rgba(255,255,255,.65)'; g.fillRect(W / 2 - 1.5, gy - 14, 3, 88);
-        for (let i = 0; i < 2; i++) { D.text(g, api.players[i].name, i ? W - 140 : 140, 70, 28, col(i)); }
-        D.text(g, over ? (pos < 0 ? api.players[0].name : api.players[1].name) + ' pulls it home' : 'TAP, TAP, TAP!', W / 2, 520, 34, SCR.fg);
+        for (let t = 0; t < 2; t++) { const nm = IDX.filter(i => tm(i) === t).map(i => api.players[i].name).join(' & '); D.text(g, nm, t ? W - 160 : 160, 70, n > 2 ? 24 : 28, col(t), 'center', 700); }
+        D.text(g, over ? IDX.filter(i => tm(i) === (pos < 0 ? 0 : 1)).map(i => api.players[i].name).join(' & ') + (n > 2 ? ' pull it home' : ' pulls it home') : 'TAP, TAP, TAP!', W / 2, 520, 34, SCR.fg);
         g.fillStyle = 'rgba(8,14,22,.55)'; D.rr(g, W / 2 - 200, 100, 400, 14, 7); g.fill(); g.fillStyle = Art.lin(g, W / 2 - 200, 0, W / 2 + 200, 0, [col(0), '#fff', col(1)]); D.disc(g, W / 2 + pos * 190, 107, 11, '#fff'); D.disc(g, W / 2 + pos * 190, 107, 7, pos < 0 ? col(0) : pos > 0 ? col(1) : '#aaa');
       }
     };
@@ -4657,7 +4918,7 @@ registerGame({
 
 /* ---------- Sword Duel ---------- */
 registerGame({
-  id: 'duel', title: 'Sword Duel', blurb: 'Close in, strike, block. Mistime it and you pay for it.',
+  id: 'duel', cpu: true, title: 'Sword Duel', blurb: 'Close in, strike, block. Mistime it and you pay for it.',
   kind: 'live', min: 2, max: 2, color: 0,
   help: 'Left and right to move. A swings your sword. Hold B to block, and a blocked swing leaves the attacker open. Five hits ends it.',
   icon() {
@@ -4674,6 +4935,22 @@ registerGame({
       else { b.hp -= HIT; b.st = 'stun'; b.t = .38; b.x += face(i) * 70; sparks.push({ x: b.x, y: GY - 90, t: .35, c: col(i) }); api.beep('hit'); if (b.hp <= 0) { b.hp = 0; b.dead = true; api.beep('die'); } }
     }
     return {
+      ai(i, dt) {
+        const S = this.s || (this.s = []), st = S[i] || (S[i] = { cd: .6, bl: 0, pa: false }), L = api.cpu, a = f[i], o = f[1 - i];
+        if (st.pa) { st.pa = false; return null; }
+        if (a.dead || o.dead || over) return null;
+        st.cd -= dt; const dx = o.x - a.x, d = Math.abs(dx), dir = dx >= 0 ? 1 : -1;
+        /* read the opponent: block a wind-up that is close, punish a recovery, otherwise close the gap and strike */
+        if (o.st === 'wind' && d < 150 && st.bl <= 0 && rand() < [.03, .09, .2][L]) st.bl = rand(.35, .6);
+        st.bl -= dt;
+        if (st.bl > 0) return { b: true, x: d < 120 ? -dir * .3 : 0 };
+        if (a.st !== 'idle') return null;
+        const open = o.st === 'recover' || o.st === 'stun' || o.st === 'swing';
+        if (d < 104 && st.cd <= 0 && (open ? rand() < [.4, .7, .95][L] : rand() < [.012, .03, .06][L])) { st.cd = [1, .65, .4][L] + rand(0, .3); st.pa = true; return { a: true }; }
+        if (d > 96) return { x: dir };
+        if (d < 62) return { x: -dir * .8 };
+        return { x: rand() < .5 ? 0 : (rand() < .5 ? dir : -dir) * .4 };
+      },
       dragAxes: 'x', drag: i => ({ x: f[i].x, y: 0 }),
       reset() { f = [{ x: 330, hp: 100, st: 'idle', t: 0, dead: false }, { x: 630, hp: 100, st: 'idle', t: 0, dead: false }]; over = false; endT = 0; winner = -1; sparks = []; },
       update(dt) {
@@ -4780,19 +5057,20 @@ registerGame({
 /* ---------- Hungry Hippos ---------- */
 registerGame({
   id: 'hippos', cpu: true, title: 'Hungry Hippos', blurb: 'Marbles everywhere. Lunge, gobble, out-eat your rival.',
-  kind: 'live', min: 2, max: 2, color: 3,
+  kind: 'live', min: 2, max: 4, color: 3,
   help: 'Up and down aim your hippo. A lunges forward to snap up marbles, then pulls back. Most marbles when the arena is empty wins.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><rect x="38" y="26" width="124" height="72" rx="10"/><path d="M12 62h42M188 62h-42"/><circle cx="62" cy="62" r="10" fill="#0F1923"/><circle cx="138" cy="62" r="10" fill="#0F1923"/><circle cx="96" cy="48" r="5" fill="#0F1923"/><circle cx="108" cy="76" r="5" fill="#0F1923"/><circle cx="100" cy="62" r="5" fill="#0F1923"/></svg>`;
   },
   create(api) {
-    const col = i => api.players[i].color, AX0 = 170, AX1 = 790, AY0 = 110, AY1 = 530, TOTAL = 24;
+    const col = i => api.players[i].color, AX0 = 170, AX1 = 790, AY0 = 110, AY1 = 530, N = () => api.players.length, TOTAL = () => 12 + N() * 6, side = i => i % 2, hsc = () => N() > 2 ? .64 : 1, MID = (AY0 + AY1) / 2,
+      lo = i => N() > 2 ? (i > 1 ? MID + 10 : AY0 + 22) : AY0 + 30, hi = i => N() > 2 ? (i > 1 ? AY1 - 22 : MID - 10) : AY1 - 30;
     let hip, balls, spawned, score, sp, over, endT;
-    const head = (i) => ({ x: i ? W - 60 - hip[i].e * 330 : 60 + hip[i].e * 330, y: hip[i].y });
+    const head = (i) => ({ x: side(i) ? W - 60 - hip[i].e * 330 : 60 + hip[i].e * 330, y: hip[i].y });
     return {
       dragAxes: 'y', drag: i => ({ x: 0, y: hip[i].y }),
       ai(i, dt) {
-        const S = (this.s || (this.s = []))[i] || (this.s[i] = {}), L = api.cpu, p = hip[i], hx = i ? W - 60 : 60;
+        const S = (this.s || (this.s = []))[i] || (this.s[i] = {}), L = api.cpu, p = hip[i], hx = side(i) ? W - 60 : 60;
         if (S.y == null || Math.abs(S.y - p.y) > 200) { S.y = p.y; S.ph = 0; S.cd = 0; }
         S.cd -= dt;
         if (S.ph === 1) { S.ph = 0; S.cd = [.9, .5, .3][L]; return { ptr: { x: hx, y: S.y, down: false } }; }
@@ -4804,28 +5082,28 @@ registerGame({
         return { ptr: { x: hx, y: S.y, down: false } };
       },
       reset() {
-        hip = [{ y: 320, e: 0, st: 'idle' }, { y: 320, e: 0, st: 'idle' }]; balls = []; spawned = 0; score = [0, 0]; sp = .5; over = false; endT = 0;
+        hip = api.players.map((_, i) => ({ y: (lo(i) + hi(i)) / 2, e: 0, st: 'idle' })); balls = []; spawned = 0; score = api.players.map(() => 0); sp = .5; over = false; endT = 0;
       },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(score[0] === score[1] ? -1 : score[0] > score[1] ? 0 : 1, `${score[0]} to ${score[1]}.`); return; }
+        if (over) { endT -= dt; if (endT <= 0) { const mx = Math.max(...score), top = score.map((v, i) => v === mx ? i : -1).filter(i => i >= 0); api.endRound(top.length > 1 ? -1 : top[0], score.join(' to ') + '.'); }; return; }
         sp -= dt;
-        if (sp <= 0 && spawned < TOTAL) { const a = rand(0, TAU), v = rand(110, 190); balls.push({ x: W / 2, y: (AY0 + AY1) / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); spawned++; sp = .75; }
+        if (sp <= 0 && spawned < TOTAL()) { const a = rand(0, TAU), v = rand(110, 190); balls.push({ x: W / 2, y: (AY0 + AY1) / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); spawned++; sp = .75; }
         balls.forEach(b => {
           b.x += b.vx * dt; b.y += b.vy * dt;
           if (b.x < AX0 + 12) { b.x = AX0 + 12; b.vx = Math.abs(b.vx); } if (b.x > AX1 - 12) { b.x = AX1 - 12; b.vx = -Math.abs(b.vx); }
           if (b.y < AY0 + 12) { b.y = AY0 + 12; b.vy = Math.abs(b.vy); } if (b.y > AY1 - 12) { b.y = AY1 - 12; b.vy = -Math.abs(b.vy); }
         });
         hip.forEach((p, i) => {
-          const s = api.input(i); p.y = clamp(s.ph ? s.py : p.y + s.y * 280 * dt, AY0 + 30, AY1 - 30);
+          const s = api.input(i); p.y = clamp(s.ph ? s.py : p.y + s.y * 280 * dt, lo(i), hi(i));
           if (p.st === 'idle' && s.pa) { p.st = 'out'; api.beep('dash'); }
           if (p.st === 'out') { p.e += dt / .17; if (p.e >= 1) { p.e = 1; p.st = 'back'; } }
           else if (p.st === 'back') { p.e -= dt / .4; if (p.e <= 0) { p.e = 0; p.st = 'idle'; } }
           if (p.st !== 'idle') {
             const hd = head(i);
-            for (let k = balls.length - 1; k >= 0; k--) if (Math.hypot(balls[k].x - hd.x, balls[k].y - hd.y) < 42) { balls.splice(k, 1); score[i]++; api.beep('eat'); }
+            for (let k = balls.length - 1; k >= 0; k--) if (Math.hypot(balls[k].x - hd.x, balls[k].y - hd.y) < 42 * hsc()) { balls.splice(k, 1); score[i]++; api.beep('eat'); }
           }
         });
-        if (spawned >= TOTAL && balls.length === 0) { over = true; endT = .8; }
+        if (spawned >= TOTAL() && balls.length === 0) { over = true; endT = .8; }
       },
       draw(g) {
         const T = performance.now() / 1000;
@@ -4833,18 +5111,18 @@ registerGame({
         g.fillStyle = Art.lin(g, 0, AY0, 0, AY1, ['#F3D78A', '#D9A94E']); D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 28); g.fill();
         g.save(); D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 28); g.clip(); g.strokeStyle = 'rgba(160,100,30,.22)'; g.lineWidth = 3; for (let k = -6; k < 16; k++) { g.beginPath(); g.moveTo(AX0 + k * 60, AY0); g.lineTo(AX0 + k * 60 + 150, AY1); g.stroke(); } g.restore();
         g.lineWidth = 10; g.strokeStyle = '#7A3FC9'; D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 28); g.stroke(); g.lineWidth = 3; g.strokeStyle = Art.INK; D.rr(g, AX0 - 5, AY0 - 5, AX1 - AX0 + 10, AY1 - AY0 + 10, 31); g.stroke(); D.rr(g, AX0 + 5, AY0 + 5, AX1 - AX0 - 10, AY1 - AY0 - 10, 25); g.stroke();
-        D.text(g, score[0], 70, 50, 56, col(0)); D.text(g, score[1], W - 70, 50, 56, col(1)); D.text(g, `${TOTAL - spawned + balls.length} left`, W / 2, 50, 24, SCR.dim);
+        score.forEach((v, i) => { const sx = side(i) ? W - 70 : 70, sy = 50 + (i > 1 ? 52 : 0); D.text(g, v, sx, sy, i > 1 ? 40 : 56, col(i)); }); D.text(g, `${TOTAL() - spawned + balls.length} left`, W / 2, 50, 24, SCR.dim);
         const MC = ['#E8553B', '#4C9AFF', '#3DDC97', '#FFC933', '#C77DFF'];
         balls.forEach((b, k) => { Art.shadow(g, b.x + 2, b.y + 9, 11, 4, .25); g.fillStyle = Art.rad(g, b.x - 4, b.y - 4, 1, 14, ['#fff', MC[k % 5], Art.shade(MC[k % 5], -.4)]); g.beginPath(); g.arc(b.x, b.y, 12, 0, TAU); g.fill(); g.strokeStyle = Art.INK; g.lineWidth = 2.6; g.stroke(); });
         hip.forEach((p, i) => {
-          const hd = head(i), bx = i ? W - 54 : 54, c = col(i), fl = i ? -1 : 1, open = p.st !== 'idle', dk = Art.shade(c, -.35);
-          Art.noodle(g, bx, p.y, hd.x - fl * 10, hd.y, 46, 0, c);
-          g.save(); g.translate(bx, p.y); g.scale(fl, 1);
+          const hd = head(i), bx = side(i) ? W - 54 : 54, c = col(i), fl = side(i) ? -1 : 1, K = hsc(), open = p.st !== 'idle', dk = Art.shade(c, -.35);
+          Art.noodle(g, bx, p.y, hd.x - fl * 10 * K, hd.y, 46 * K, 0, c);
+          g.save(); g.translate(bx, p.y); g.scale(fl * K, K);
           g.fillStyle = Art.rad(g, -12, -16, 4, 60, [Art.shade(c, .35), c, dk]); g.beginPath(); g.ellipse(0, 0, 46, 54, 0, 0, TAU); g.fill(); g.strokeStyle = Art.INK; g.lineWidth = 3.5; g.stroke();
           g.fillStyle = Art.shade(c, .45); g.beginPath(); g.ellipse(14, 12, 26, 32, 0, 0, TAU); g.fill();
           g.fillStyle = Art.shade(c, -.1); g.beginPath(); g.ellipse(-4, -48, 12, 8, .3, 0, TAU); g.fill(); g.stroke();
           g.restore();
-          g.save(); g.translate(hd.x, hd.y); g.scale(fl, 1);
+          g.save(); g.translate(hd.x, hd.y); g.scale(fl * K, K);
           const my = open ? 20 : 4;
           g.fillStyle = dk; g.beginPath(); g.ellipse(2, my * .5 + 6, 44, 28 + my * .4, 0, 0, TAU); g.fill(); g.lineWidth = 3.5; g.strokeStyle = Art.INK; g.stroke();
           g.fillStyle = '#4A1418'; g.beginPath(); g.ellipse(14, 4, open ? 26 : 16, open ? 26 : 8, 0, 0, TAU); g.fill(); g.stroke();
@@ -4888,17 +5166,17 @@ function drawSymbol(g, s, x, y, r, c, face) {
 
 /* ---------- Slot Cars ---------- */
 registerGame({
-  id: 'slotcars', title: 'Slot Cars', blurb: 'Hold A for speed, ease off before the bends. Three laps.',
-  kind: 'live', min: 2, max: 2, color: 0,
+  id: 'slotcars', cpu: true, title: 'Slot Cars', blurb: 'Hold A for speed, ease off before the bends. Three laps.',
+  kind: 'live', min: 2, max: 4, color: 0,
   help: 'Hold A to accelerate and B to brake. Take a bend too fast and your car flies off the track and loses time.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><rect x="20" y="22" width="160" height="82" rx="41"/><rect x="46" y="44" width="108" height="38" rx="19"/><rect x="88" y="94" width="26" height="14" rx="3" fill="#0F1923"/><rect x="128" y="14" width="26" height="14" rx="3" fill="#0F1923" transform="rotate(10 141 21)"/></svg>`;
   },
   create(api) {
-    const CX = 480, CY = 300, HS = 190, R = [118, 168], LAPS = 3, VMAX = .26, VCURVE = .135, col = i => api.players[i].color;
+    const CX = 480, CY = 300, HS = 190, N = () => api.players.length, RL = () => N() > 2 ? [96, 130, 164, 198] : [118, 168], LAPS = 3, VMAX = .26, VCURVE = .135, col = i => api.players[i].color;
     const LEN = r => 4 * HS + 2 * Math.PI * r;
     function at(lane, p) {
-      const r = R[lane], L = LEN(r), s = (((p % 1) + 1) % 1) * L; let x, y, a, curve = false, k = 0;
+      const r = RL()[lane], L = LEN(r), s = (((p % 1) + 1) % 1) * L; let x, y, a, curve = false, k = 0;
       if (s < HS) { x = CX + s; y = CY + r; a = 0; }
       else if (s < HS + Math.PI * r) { const th = (s - HS) / r; x = CX + HS + r * Math.sin(th); y = CY + r * Math.cos(th); a = -th; curve = true; k = 1; }
       else if (s < 3 * HS + Math.PI * r) { const s2 = s - HS - Math.PI * r; x = CX + HS - s2; y = CY - r; a = Math.PI; }
@@ -4906,11 +5184,21 @@ registerGame({
       else { const s4 = s - 3 * HS - 2 * Math.PI * r; x = CX - HS + s4; y = CY + r; a = 0; }
       return { x, y, a, curve, k };
     }
-    const curveStart = (lane, k) => { const r = R[lane], L = LEN(r); return (k === 1 ? HS : 3 * HS + Math.PI * r) / L; };
+    const curveStart = (lane, k) => { const r = RL()[lane], L = LEN(r); return (k === 1 ? HS : 3 * HS + Math.PI * r) / L; };
     let car, over, endT, winner;
     return {
+      ai(i) {
+        const c = car[i]; if (!c || over || c.out > 0) return null; const L = api.cpu, lane = i, r = RL()[lane], Ln = LEN(r), sp = (((c.p % 1) + 1) % 1) * Ln;
+        const c1 = HS, c1e = HS + Math.PI * r, c2 = 3 * HS + Math.PI * r, c2e = 3 * HS + 2 * Math.PI * r;
+        const inCurve = (sp >= c1 && sp < c1e) || (sp >= c2 && sp < c2e);
+        let ds = sp < c1 ? c1 - sp : sp < c2 ? c2 - sp : Ln - sp + c1; if (inCurve) ds = 0;
+        const vc = VCURVE * [.9, .96, .985][L], need = c.v > vc ? ((c.v - vc) / .39) * ((c.v + vc) / 2) : 0, margin = [1.7, 1.25, 1.08][L];
+        const slow = inCurve || ds / Ln < need * margin + .004;
+        if (slow) return { a: c.v < vc - .004, b: c.v > vc + .004 };
+        return { a: true, b: false };
+      },
       tapA: true, touch: 'Press and hold your side to speed up. Right-click or a second finger brakes.',
-      reset() { car = [0, 1].map(() => ({ p: 0, v: 0, over: 0, out: 0 })); over = false; endT = 0; winner = -1; },
+      reset() { car = api.players.map(() => ({ p: 0, v: 0, over: 0, out: 0 })); over = false; endT = 0; winner = -1; },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${LAPS} laps done.`); return; }
         car.forEach((c, i) => {
@@ -4923,26 +5211,28 @@ registerGame({
           c.p += c.v * dt;
         });
         const fin = car.map((c, i) => c.p >= LAPS ? i : -1).filter(i => i >= 0);
-        if (fin.length) { over = true; endT = 1; winner = fin.length === 1 ? fin[0] : (car[0].p >= car[1].p ? 0 : 1); api.beep('win'); }
+        if (fin.length) { over = true; endT = 1; winner = fin.length === 1 ? fin[0] : fin.reduce((b, i) => car[i].p > car[b].p ? i : b, fin[0]); api.beep('win'); }
       },
       draw(g) {
-        for (let i = 1; i >= 0; i--) {
+        const TW = N() > 2 ? 28 : 42;
+        for (let i = N() - 1; i >= 0; i--) {
           g.beginPath(); for (let k = 0; k <= 120; k++) { const q = at(i, k / 120); if (k) g.lineTo(q.x, q.y); else g.moveTo(q.x, q.y); }
-          g.closePath(); g.strokeStyle = '#1B2E40'; g.lineWidth = 42; g.stroke(); g.strokeStyle = '#26425A'; g.lineWidth = 4; g.setLineDash([14, 12]); g.stroke(); g.setLineDash([]);
+          g.closePath(); g.strokeStyle = '#1B2E40'; g.lineWidth = TW; g.stroke(); g.strokeStyle = '#26425A'; g.lineWidth = 3; g.setLineDash([14, 12]); g.stroke(); g.setLineDash([]);
         }
-        g.strokeStyle = SCR.fg; g.lineWidth = 5; g.beginPath(); g.moveTo(CX, CY + R[0] - 26); g.lineTo(CX, CY + R[1] + 26); g.stroke();
+        g.strokeStyle = SCR.fg; g.lineWidth = 5; g.beginPath(); g.moveTo(CX, CY + RL()[0] - 20); g.lineTo(CX, CY + RL()[N() - 1] + 20); g.stroke();
         g.fillStyle = 'rgba(255,107,74,.18)';
         car.forEach((c, i) => {
           const q = at(i, c.p); g.save(); g.translate(q.x, q.y);
-          if (c.out > 0) { g.rotate(q.a + (1.3 - c.out) * 9); g.globalAlpha = .6 + Math.sin(c.out * 30) * .3; g.translate(0, (i ? 1 : -1) * 14 * (1.3 - c.out)); } else g.rotate(q.a);
+          if (c.out > 0) { g.rotate(q.a + (1.3 - c.out) * 9); g.globalAlpha = .6 + Math.sin(c.out * 30) * .3; g.translate(0, (i % 2 ? 1 : -1) * 14 * (1.3 - c.out)); } else g.rotate(q.a);
+          if (N() > 2) g.scale(.78, .78);
           g.fillStyle = col(i); D.rr(g, -17, -9, 34, 18, 5); g.fill(); g.fillStyle = 'rgba(15,25,35,.4)'; g.fillRect(-4, -7, 10, 14); g.restore();
         });
         D.text(g, `Laps ${LAPS}`, W / 2, 300, 26, SCR.dim);
-        for (let i = 0; i < 2; i++) {
-          const c = car[i], x = i ? 740 : 40, y = 540;
-          D.text(g, `${api.players[i].name}  Lap ${Math.min(LAPS, Math.floor(c.p) + 1)}/${LAPS}`, x, y - 22, 20, col(i), 'left');
-          g.fillStyle = '#1B2A38'; g.fillRect(x, y, 180, 12); g.fillStyle = c.v > VCURVE ? '#FF6B4A' : col(i); g.fillRect(x, y, 180 * c.v / VMAX, 12);
-          g.fillStyle = SCR.fg; g.fillRect(x + 180 * VCURVE / VMAX - 1, y - 4, 3, 20);
+        for (let i = 0; i < N(); i++) {
+          const c = car[i], x = N() > 2 ? 24 + i * 232 : (i ? 740 : 40), y = 540, bw = N() > 2 ? 190 : 180;
+          D.text(g, `${api.players[i].name}  Lap ${Math.min(LAPS, Math.floor(c.p) + 1)}/${LAPS}`, x, y - 22, N() > 2 ? 17 : 20, col(i), 'left');
+          g.fillStyle = '#1B2A38'; g.fillRect(x, y, bw, 12); g.fillStyle = c.v > VCURVE ? '#FF6B4A' : col(i); g.fillRect(x, y, bw * c.v / VMAX, 12);
+          g.fillStyle = SCR.fg; g.fillRect(x + bw * VCURVE / VMAX - 1, y - 4, 3, 20);
         }
       }
     };
@@ -4951,7 +5241,7 @@ registerGame({
 
 /* ---------- Road Dodge ---------- */
 registerGame({
-  id: 'roaddodge', title: 'Road Dodge', blurb: 'Same traffic, two roads. Weave through it. First crash loses.',
+  id: 'roaddodge', cpu: true, title: 'Road Dodge', blurb: 'Same traffic, two roads. Weave through it. First crash loses.',
   kind: 'live', min: 2, max: 2, color: 1,
   help: 'Left and right change lane. Both roads get exactly the same traffic, and the road speeds up. The first car to crash loses.',
   icon() {
@@ -4961,6 +5251,17 @@ registerGame({
     const col = i => api.players[i].color, PX = [80, 500], PW = 380, TOP = 70, BOT = 580, CARY = 480, LW = PW / 3;
     let rows, dist, car, over, endT, winner;
     return {
+      ai(i) {
+        const c = car[i], S = this.s || (this.s = []), st = S[i] || (S[i] = { p: false }); if (!c || !c.alive || over) return null;
+        if (st.p) { st.p = false; return null; }
+        const L = api.cpu, look = [230, 330, 460][L]; let row = null; for (const r of rows) { const dz = r.z - dist; if (dz < -50) continue; if (dz > look) break; row = r; if (dz > 40) break; }
+        if (!row) return null;
+        /* pick the open lane nearest to this one on the next rows that are really close */
+        const safe = [0, 1, 2].filter(l => !row.mask[l]); if (!safe.length || !row.mask[c.lane]) return null;
+        if (rand() < [.012, .003, 0][L]) return null;
+        const tg = safe.reduce((b, l) => Math.abs(l - c.lane) < Math.abs(b - c.lane) ? l : b, safe[0]);
+        st.p = true; return { x: tg > c.lane ? 1 : -1 };
+      },
       touch: 'Click or tap the lane you want on your road.',
       pointer(x, y, t, i) { if (!car || !car[i] || t === 'up') return; if (x < PX[i] - 40 || x > PX[i] + PW + 40) return; car[i].lane = clamp(Math.floor((x - PX[i]) / LW), 0, 2); },
       reset() {
@@ -5008,7 +5309,7 @@ registerGame({
 
 /* ---------- Gravity Run ---------- */
 registerGame({
-  id: 'gravityrun', title: 'Gravity Run', blurb: 'Flip between floor and ceiling to dodge spikes. Last runner wins.',
+  id: 'gravityrun', cpu: true, title: 'Gravity Run', blurb: 'Flip between floor and ceiling to dodge spikes. Last runner wins.',
   kind: 'live', min: 2, max: 2, color: 3,
   help: 'Press A to flip gravity and run on the other side. Both lanes get identical spikes at the same pace. The first runner to hit one loses.',
   icon() {
@@ -5019,6 +5320,15 @@ registerGame({
     let obs, dist, run, over, endT, winner;
     const yF = i => SY[i] + SH - 22, yC = i => SY[i] + 22;
     return {
+      ai(i) {
+        const r = run[i], S = this.s || (this.s = []), st = S[i] || (S[i] = { p: false, cd: 0 }); if (!r || !r.alive || over) return null;
+        if (st.p) { st.p = false; return null; } st.cd -= 1 / 60;
+        const L = api.cpu, speed = Math.min(680, 380 + dist * .035), lead = speed * [.3, .42, .5][L] + 46;
+        const mySide = r.g === 1 ? 0 : 1; let danger = false;
+        for (const o of obs) { const dx = o.d - dist; if (dx > lead) break; if (dx < -30) continue; if (o.side === mySide) danger = true; }
+        if (danger && st.cd <= 0 && rand() < [.5, .8, 1][L]) { st.p = true; st.cd = .45; return { a: true }; }
+        return null;
+      },
       tapA: true, touch: 'Click or tap your half to flip gravity.',
       reset() {
         obs = []; let d = 760; for (let k = 0; k < 200; k++) { obs.push({ d, side: irand(0, 1) }); d += irand(300, 480); }
@@ -5067,8 +5377,8 @@ registerGame({
 
 /* ---------- Maze Paint ---------- */
 registerGame({
-  id: 'mazepaint', title: 'Maze Paint', blurb: 'Run the maze and paint every tile. Painted over tiles change owner.',
-  kind: 'live', min: 2, max: 2, color: 2,
+  id: 'mazepaint', cpu: true, title: 'Maze Paint', blurb: 'Run the maze and paint every tile. Painted over tiles change owner.',
+  kind: 'live', min: 2, max: 4, color: 2,
   help: 'Steer through the maze to colour tiles. Walk over your rival\'s colour to steal it. Whoever owns more tiles after 45 seconds wins.',
   icon() {
     let s = ''; const f = [[1, 1], [2, 1], [3, 1], [3, 2], [3, 3]];
@@ -5078,7 +5388,7 @@ registerGame({
   create(api) {
     const COLS = 20, ROWS = 12, CS = 42, X0 = 60, Y0 = 78, col = i => api.players[i].color, TOTAL = 45;
     let wr, wd, own, pos, cd, tl, over, endT, counts;
-    const count = () => { counts = [0, 0]; for (const row of own) for (const v of row) if (v >= 0) counts[v]++; };
+    const N = () => api.players.length, count = () => { counts = api.players.map(() => 0); for (const row of own) for (const v of row) if (v >= 0) counts[v]++; };
     function gen() {
       wr = Array.from({ length: ROWS }, () => Array(COLS).fill(true)); wd = Array.from({ length: ROWS }, () => Array(COLS).fill(true));
       const seen = Array.from({ length: ROWS }, () => Array(COLS).fill(false)), st = [[0, 0]]; seen[0][0] = true;
@@ -5108,18 +5418,33 @@ registerGame({
       for (const [dr, dc, ok] of opts) if (ok && dist[r0 + dr][c0 + dc] === d0 - 1) return [dr, dc];
       return null;
     }
+    function pickGoal(i) {
+      const [r0, c0] = pos[i], L = api.cpu, dist = Array.from({ length: ROWS }, () => Array(COLS).fill(-1)), q = [[r0, c0]]; dist[r0][c0] = 0;
+      for (let h = 0; h < q.length; h++) {
+        const [r, c] = q[h], d = dist[r][c], tryN = (nr, nc, open) => { if (open && dist[nr][nc] < 0) { dist[nr][nc] = d + 1; q.push([nr, nc]); } };
+        if (c + 1 < COLS) tryN(r, c + 1, !wr[r][c]); if (c - 1 >= 0) tryN(r, c - 1, !wr[r][c - 1]); if (r + 1 < ROWS) tryN(r + 1, c, !wd[r][c]); if (r - 1 >= 0) tryN(r - 1, c, !wd[r - 1][c]);
+      }
+      let best = null, bs = 1e9;
+      for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+        if (own[r][c] === i || dist[r][c] <= 0) continue;
+        let sc = dist[r][c] + rand(0, [10, 5, 2][L]); if (own[r][c] >= 0) sc -= [0, 1.5, 3][L];
+        if (sc < bs) { bs = sc; best = [r, c]; }
+      }
+      return best;
+    }
     return {
+      ai(i) { if (!pos || over) return null; if (!goal[i]) goal[i] = pickGoal(i); return null; },
       touch: 'Click or drag to a tile and your runner paints its way there.',
       pointer(x, y, t, i) { const c = Math.floor((x - X0) / CS), r = Math.floor((y - Y0) / CS); if (c < 0 || c >= COLS || r < 0 || r >= ROWS || !pos) return; goal[i] = [r, c]; },
       reset() {
-        goal = [null, null];
-        gen(); own = Array.from({ length: ROWS }, () => Array(COLS).fill(-1)); pos = [[0, 0], [ROWS - 1, COLS - 1]]; cd = [0, 0]; tl = TOTAL; over = false; endT = 0;
-        own[0][0] = 0; own[ROWS - 1][COLS - 1] = 1; count();
+        goal = [null, null, null, null];
+        gen(); own = Array.from({ length: ROWS }, () => Array(COLS).fill(-1)); pos = [[0, 0], [ROWS - 1, COLS - 1], [0, COLS - 1], [ROWS - 1, 0]].slice(0, N()); cd = pos.map(() => 0); tl = TOTAL; over = false; endT = 0;
+        pos.forEach(([pr, pc], k) => { own[pr][pc] = k; }); count();
       },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(counts[0] === counts[1] ? -1 : counts[0] > counts[1] ? 0 : 1, `${counts[0]} to ${counts[1]} tiles.`); return; }
+        if (over) { endT -= dt; if (endT <= 0) { const mx = Math.max(...counts), top = counts.map((v, k) => v === mx ? k : -1).filter(k => k >= 0); api.endRound(top.length > 1 ? -1 : top[0], counts.join(' to ') + ' tiles.'); } return; }
         tl -= dt; if (tl <= 0) { over = true; endT = .9; return; }
-        for (let i = 0; i < 2; i++) {
+        for (let i = 0; i < N(); i++) {
           cd[i] -= dt; if (cd[i] > 0) continue; const s = api.input(i); let dr = 0, dc = 0;
           if (Math.abs(s.x) > .5 && Math.abs(s.x) >= Math.abs(s.y)) { dc = Math.sign(s.x); goal[i] = null; } else if (Math.abs(s.y) > .5) { dr = Math.sign(s.y); goal[i] = null; } else { const st = stepTo(i); if (!st) continue; dr = st[0]; dc = st[1]; }
           const [r, c] = pos[i]; let ok = false;
@@ -5129,7 +5454,7 @@ registerGame({
         }
       },
       draw(g) {
-        D.text(g, counts[0], 100, 40, 48, col(0)); D.text(g, counts[1], W - 100, 40, 48, col(1)); D.text(g, Math.max(0, Math.ceil(tl)), W / 2, 40, 46, tl < 8 ? '#FF6B4A' : SCR.fg);
+        counts.forEach((v, k) => D.text(g, v, (N() > 2 ? (N() === 3 ? [100, 280, W - 100] : [100, 280, W - 280, W - 100]) : [100, W - 100])[k], 40, 44, col(k))); D.text(g, Math.max(0, Math.ceil(tl)), W / 2, 40, 46, tl < 8 ? '#FF6B4A' : SCR.fg);
         for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
           g.fillStyle = own[r][c] >= 0 ? col(own[r][c]) : '#16212C'; g.globalAlpha = own[r][c] >= 0 ? .6 : 1; g.fillRect(X0 + c * CS, Y0 + r * CS, CS, CS); g.globalAlpha = 1;
         }
@@ -5148,7 +5473,7 @@ registerGame({
 
 /* ---------- Find Match ---------- */
 registerGame({
-  id: 'findmatch', title: 'Find Match', blurb: 'Two cards, one shared symbol. Spot it first.',
+  id: 'findmatch', cpu: true, title: 'Find Match', blurb: 'Two cards, one shared symbol. Spot it first.',
   kind: 'live', min: 2, max: 2, color: 1,
   help: 'Exactly one symbol appears on both cards. Left and right move through the symbols, up and down jump to the other card, A picks. A wrong pick freezes you for a second. First to five.',
   icon() {
@@ -5166,6 +5491,14 @@ registerGame({
     const symAt = idx => idx < 6 ? A[idx] : B[idx - 6];
     const tap = [-1, -1];
     return {
+      ai(i, dt) {
+        const S = this.s || (this.s = []), st = S[i] || (S[i] = { d: null }), L = api.cpu;
+        if (ph !== 'play' || lockT[i] > 0) { st.d = null; return null; }
+        if (st.d == null) st.d = [3.2, 2.0, 1.1][L] + rand(0, [2, 1.2, .6][L]);
+        st.d -= dt; if (st.d > 0) return null; st.d = null;
+        if (rand() < [.22, .08, 0][L]) { tap[i] = irand(0, 11); return null; }
+        const ci = rand() < .5 ? 0 : 1; tap[i] = ci * 6 + (ci ? B : A).indexOf(shared); return null;
+      },
       touch: 'Click or tap the symbol you think both cards share.',
       pointer(x, y, t, i) {
         if (t !== 'down' || ph !== 'play') return;
@@ -5213,7 +5546,7 @@ registerGame({
 
 /* ---------- Chess ---------- */
 registerGame({
-  id: 'chess', title: 'Chess', blurb: 'The full game: castling, en passant, promotion, checkmate.',
+  id: 'chess', cpu: true, title: 'Chess', blurb: 'The full game: castling, en passant, promotion, checkmate.',
   kind: 'turns', min: 2, max: 2, color: 1,
   help: 'Move the cursor to one of your pieces and press A, then pick a highlighted square. B cancels. Pawns promote to queens. Draws by stalemate, repetition, 50 moves or lack of material.',
   icon() {
@@ -5325,7 +5658,44 @@ registerGame({
       else if (t === 'K') { poly([[-9, -12], [-13, 13], [13, 13], [9, -12]]); g.fillRect(-2.5, -27, 5, 16); g.strokeRect(-2.5, -27, 5, 16); g.fillRect(-8, -22, 16, 5); g.strokeRect(-8, -22, 16, 5); base(); }
       g.restore();
     }
+    const VAL = { P: 100, N: 320, B: 335, R: 500, Q: 900, K: 20000 }, NOCS = [{ k: false, q: false }, { k: false, q: false }];
+    function evalBd(bd, color) {
+      let s = 0;
+      for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+        const p = bd[r][c]; if (!p) continue;
+        let v = VAL[p.t]; const cen = 3.5 - Math.max(Math.abs(r - 3.5), Math.abs(c - 3.5)) * .5;
+        if (p.t === 'P') v += (p.c === 0 ? 6 - r : r - 1) * 6 + cen * 3; else if (p.t === 'N' || p.t === 'B') v += cen * 8; else if (p.t === 'Q') v += cen * 2;
+        s += p.c === color ? v : -v;
+      }
+      return s;
+    }
+    function search(bd, color, depth, alpha, beta) {
+      if (depth === 0) return evalBd(bd, color);
+      const ms = pseudo(bd, color, null, NOCS); if (!ms.length) return 0;
+      ms.sort((a, c) => ((bd[c.tr][c.tc] ? VAL[bd[c.tr][c.tc].t] : 0) - (bd[a.tr][a.tc] ? VAL[bd[a.tr][a.tc].t] : 0)));
+      let best = -1e9;
+      for (const m of ms) {
+        if (bd[m.tr][m.tc] && bd[m.tr][m.tc].t === 'K') return 30000 + depth;
+        const v = -search(apply(bd, m), 1 - color, depth - 1, -beta, -alpha);
+        if (v > best) best = v; if (best > alpha) alpha = best; if (alpha >= beta) break;
+      }
+      return best;
+    }
+    function pickMove() {
+      const L = api.cpu, D0 = [1, 2, 3][L]; let best = null, bs = -1e9;
+      for (const m of legal) {
+        const nb = apply(b, m); let v = -search(nb, 1 - turn, D0 - 1, -1e9, 1e9);
+        if (!legalMoves(nb, 1 - turn, null, NOCS).length && inCheck(nb, 1 - turn)) v = 50000;
+        v += rand(0, [160, 18, 4][L]); if (v > bs) { bs = v; best = m; }
+      }
+      return best;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.6, 1.1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const m = pickMove(); if (m) { cr = m.tr; cc = m.tc; doMove(m); } return null;
+      },
       reset(r) {
         b = Array.from({ length: 8 }, () => Array(8).fill(null)); const back = ['R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R'];
         for (let c = 0; c < 8; c++) { b[0][c] = { t: back[c], c: 1 }; b[1][c] = { t: 'P', c: 1 }; b[6][c] = { t: 'P', c: 0 }; b[7][c] = { t: back[c], c: 0 }; }
@@ -5361,7 +5731,7 @@ registerGame({
 
 /* ---------- Ultimate Tic-Tac-Toe ---------- */
 registerGame({
-  id: 'ultimate', title: 'Ultimate Tic-Tac-Toe', blurb: 'Nine boards in one. Your move sends your rival to the matching board.',
+  id: 'ultimate', cpu: true, title: 'Ultimate Tic-Tac-Toe', blurb: 'Nine boards in one. Your move sends your rival to the matching board.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Where you play inside a small board decides which small board your opponent must play in next. Win three small boards in a row to win. Glowing boards are the legal ones.',
   icon() {
@@ -5390,7 +5760,28 @@ registerGame({
       if (p === 0) { g.moveTo(x - s, y - s); g.lineTo(x + s, y + s); g.moveTo(x + s, y - s); g.lineTo(x - s, y + s); } else g.arc(x, y, s * 1.05, 0, TAU);
       g.stroke(); g.globalAlpha = 1;
     };
+    const wins = (arr, i, p) => { const t = arr.slice(); t[i] = p; return !!lineOf(t, p); };
+    function pickUttt() {
+      const L = api.cpu, opts = [];
+      for (let bd = 0; bd < 9; bd++) if (won[bd] === -1 && (next < 0 || next === bd)) for (let i = 0; i < 9; i++) if (cells[bd][i] === -1) {
+        let v = rand(0, [8, 1.2, .3][L]);
+        if (wins(cells[bd], i, turn)) { v += 10; const w2 = won.slice(); w2[bd] = turn; if (lineOf(w2, turn)) v += 100; }
+        else if (wins(cells[bd], i, 1 - turn)) v += 6;
+        if (L > 0) {
+          if (won[i] !== -1) v -= 1.5; else { let thr = false; for (let k = 0; k < 9; k++) if (cells[i][k] === -1 && wins(cells[i], k, 1 - turn)) thr = true; if (thr) v -= 7; }
+          if (i === 4) v += 1.2; else if (i % 2 === 0) v += .5;
+          if (bd === 4) v += .6;
+        }
+        opts.push({ bd, i, v });
+      }
+      opts.sort((a, b) => b.v - a.v); return opts[0];
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.4, .9) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const o = pickUttt(); if (!o) return null; const r = Math.floor(o.bd / 3) * 3 + Math.floor(o.i / 3), c = (o.bd % 3) * 3 + (o.i % 3); gr = r; gc = c; place(r, c); return null;
+      },
       reset(r) { cells = Array.from({ length: 9 }, () => Array(9).fill(-1)); won = Array(9).fill(-1); next = -1; turn = r % 2; gr = 4; gc = 4; over = false; endT = 0; winner = -1; lastCell = null; api.turn(turn); },
       update(dt) {
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, winner >= 0 ? 'Three boards in a row.' : 'Every board is settled.'); return; }
@@ -5418,8 +5809,8 @@ registerGame({
 
 /* ---------- Snakes and Ladders ---------- */
 registerGame({
-  id: 'snakes', title: 'Snakes & Ladders', blurb: 'Roll, climb, slide. First to square 100 on an exact roll.',
-  kind: 'turns', min: 2, max: 2, color: 3,
+  id: 'snakes', cpu: true, title: 'Snakes & Ladders', blurb: 'Roll, climb, slide. First to square 100 on an exact roll.',
+  kind: 'turns', min: 2, max: 4, color: 3,
   help: 'Tap or press A to roll. Ladders carry you up, snakes drop you down. You need the exact number to land on 100. A six gives another roll.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><path d="M50 108L90 14M72 108L112 14M58 88l22 4M66 66l22 4M74 44l22 4"/><path d="M140 20c-26 12 18 24-8 38s20 26-4 44" stroke-width="7"/><circle cx="140" cy="20" r="6" fill="#0F1923"/></svg>`;
@@ -5427,16 +5818,20 @@ registerGame({
   create(api) {
     const CS = 52, X0 = 220, Y0 = 52, col = i => api.players[i].color;
     const SNAKES = { 16: 6, 47: 26, 49: 11, 56: 53, 62: 19, 64: 60, 87: 24, 93: 73, 95: 75, 98: 78 }, LADDERS = { 1: 38, 4: 14, 9: 31, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 80: 100 };
-    let pos, turn, phase, t, die, steps, anim, over, endT, winner, toSq, again;
+    let pos, turn, phase, t, die, steps, anim, over, endT, winner, toSq, again; const n = api.n;
     const sq = n => {
       if (n <= 0) return [X0 - 26, Y0 + 9 * CS + CS / 2]; const i = n - 1, row = Math.floor(i / 10), c = row % 2 === 0 ? i % 10 : 9 - (i % 10);
       return [X0 + c * CS + CS / 2, Y0 + (9 - row) * CS + CS / 2];
     };
     let want = false;
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'roll' || turn !== i || over) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, 1.1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null; want = true; return null;
+      },
       touch: 'Click or tap anywhere to roll the die.',
       pointer(x, y, t) { if (t === 'down') want = true; },
-      reset(r) { want = false; pos = [0, 0]; turn = r % 2; phase = 'roll'; t = 0; die = 1; steps = 0; anim = 0; over = false; endT = 0; winner = -1; toSq = 0; again = false; api.turn(turn); },
+      reset(r) { want = false; pos = Array(n).fill(0); turn = r % n; phase = 'roll'; t = 0; die = 1; steps = 0; anim = 0; over = false; endT = 0; winner = -1; toSq = 0; again = false; api.turn(turn); },
       update(dt) {
         anim += dt; if (phase !== 'roll') want = false;
         if (phase === 'roll') { const s = api.input(turn); if (s.pa || want) { want = false; die = irand(1, 6); phase = 'rolling'; t = .6; api.beep('select'); } }
@@ -5453,7 +5848,7 @@ registerGame({
           t -= dt;
           if (t <= 0) {
             if (pos[turn] === 100) { over = true; endT = 1.1; winner = turn; phase = 'done'; api.beep('win'); }
-            else { again = die === 6 && steps === 0 && pos[turn] + 0 >= 0 && !(die === 6 && false); if (die === 6) again = true; else again = false; if (!again) turn = 1 - turn; api.turn(turn); phase = 'roll'; }
+            else { again = die === 6 && steps === 0 && pos[turn] + 0 >= 0 && !(die === 6 && false); if (die === 6) again = true; else again = false; if (!again) turn = (turn + 1) % n; api.turn(turn); phase = 'roll'; }
           }
         } else if (phase === 'done') { endT -= dt; if (endT <= 0) api.endRound(winner, 'Reached square 100.'); }
       },
@@ -5474,13 +5869,13 @@ registerGame({
           g.strokeStyle = '#1F8A5F'; g.lineWidth = 3; g.setLineDash([2, 12]); g.stroke(); g.setLineDash([]);
           D.disc(g, x1, y1, 9, '#3DDC97'); D.disc(g, x1 - 3, y1 - 2, 2, SCR.bg); D.disc(g, x1 + 3, y1 - 2, 2, SCR.bg);
         }
-        for (let i = 0; i < 2; i++) {
+        for (let i = 0; i < n; i++) {
           let [x, y] = sq(pos[i]);
           if (phase === 'slide' && i === turn) { const [tx, ty] = sq(toSq), f = 1 - clamp(t / .6, 0, 1); x += (tx - x) * f; y += (ty - y) * f; }
-          const off = i ? 9 : -9; D.disc(g, x + off + 2, y + 5, 14, 'rgba(0,0,0,.35)'); D.disc(g, x + off, y, 14, col(i)); D.disc(g, x + off - 4, y - 5, 4, 'rgba(255,255,255,.28)');
+          const ox = [-9, 9, -9, 9][i], oy = n > 2 ? [-8, -8, 9, 9][i] : 0, rr = n > 2 ? 11 : 14; D.disc(g, x + ox + 2, y + oy + 5, rr, 'rgba(0,0,0,.35)'); D.disc(g, x + ox, y + oy, rr, col(i)); D.disc(g, x + ox - 3, y + oy - 4, 3.5, 'rgba(255,255,255,.28)');
         }
         D.text(g, over ? api.players[winner].name + ' wins' : api.players[turn].name + "'s turn", 110, 90, 24, over ? SCR.fg : col(turn));
-        for (let i = 0; i < 2; i++) { D.text(g, api.players[i].name, 110 + i * 740, 190, 20, col(i)); D.text(g, pos[i], 110 + i * 740, 245, 60, col(i)); }
+        for (let i = 0; i < n; i++) { const hx = 110 + (i % 2) * 740, hy = 190 + Math.floor(i / 2) * 150; D.text(g, api.players[i].name, hx, hy, 20, col(i)); D.text(g, pos[i], hx, hy + 55, n > 2 ? 48 : 60, col(i)); }
         const dx = W - 110, dy = 400;
         g.fillStyle = SCR.fg; D.rr(g, dx - 40, dy - 40, 80, 80, 14); g.fill();
         const face = phase === 'rolling' ? 1 + (Math.floor(anim * 24) % 6) : die;
@@ -5494,7 +5889,7 @@ registerGame({
 
 /* ---------- Shut the Box ---------- */
 registerGame({
-  id: 'shutbox', title: 'Shut the Box', blurb: 'Roll the dice, then close tiles that add up to your roll. Lowest leftover wins.',
+  id: 'shutbox', cpu: true, title: 'Shut the Box', blurb: 'Roll the dice, then close tiles that add up to your roll. Lowest leftover wins.',
   kind: 'turns', min: 2, max: 2, color: 2,
   help: 'Tap or press A to roll. Then tap tiles, or move along the tiles with left and right and press A to pick tiles that add up to the roll. B clears your picks. When you cannot make the roll, your turn ends and open tiles count against you.',
   icon() {
@@ -5513,7 +5908,21 @@ registerGame({
       turn = 1 - turn; phase = 'roll'; api.turn(turn);
     }
     let tap = null;
+    function bestSubset(i, tot) {
+      const a = openNums(i); let best = null, bs = -1e9;
+      for (let m = 1; m < (1 << a.length); m++) {
+        let s = 0, q = 0; for (let k = 0; k < a.length; k++) if (m & (1 << k)) { s += a[k]; q += a[k] * a[k]; }
+        if (s !== tot) continue; const v = q + rand(0, [200, 20, 1][api.cpu]); if (v > bs) { bs = v; best = a.filter((_, k) => m & (1 << k)); }
+      }
+      return best;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (turn !== i || (phase !== 'roll' && phase !== 'pick')) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, 1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        if (phase === 'roll') { tap = [0, 0]; return null; }
+        const sub = bestSubset(turn, total); if (sub) { picks = new Set(sub); phase = 'close'; t = .5; api.beep('place'); } return null;
+      },
       touch: 'Tap to roll the dice, tap tiles that add up to the roll. Tap the dice to clear.',
       pointer(x, y, t) { if (t === 'down') tap = [x, y]; },
       reset(r) {
@@ -5585,7 +5994,7 @@ registerGame({
 
 /* ---------- Yazy (five dice) ---------- */
 registerGame({
-  id: 'yazy', title: 'Yazy', blurb: 'Five dice, three rolls a turn, thirteen boxes to fill. The classic dice game.',
+  id: 'yazy', cpu: true, title: 'Yazy', blurb: 'Five dice, three rolls a turn, thirteen boxes to fill. The classic dice game.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Tap or press A to roll. Then left/right picks a die and A holds it, B rolls the rest again (up to three rolls). Press down to choose a box, A scores it. Up or B returns to the dice.',
   icon() {
@@ -5611,6 +6020,23 @@ registerGame({
     function startRoll() {
       pending = dice.map((v, i) => held[i] && rolls > 0 ? v : irand(1, 6)); rolls++; phase = 'rolling'; t = .55; api.beep('select');
     }
+    const PAR = [3, 6, 9, 12, 15, 18, 17, 11, 10, 10, 8, 4, 22];
+    const catVal = (o, d, cat) => score(cat, d) - PAR[cat] * .75 + (cat < 6 && score(cat, d) >= 3 * (cat + 1) ? 2 : 0) + (cat === 11 && score(cat, d) ? 20 : 0);
+    const bestCat = (o, d) => { let bc = o[0], bv = -1e9; for (const k of o) { const v = catVal(o, d, k); if (v > bv) { bv = v; bc = k; } } return [bc, bv]; };
+    function planYazy() {
+      const o = openCats(), L = api.cpu, [bc, bv] = bestCat(o, dice);
+      if (rolls >= 3) return { cat: bc };
+      if (L === 0) { if (rolls < 2 && rand(0, 1) < .6) { const keep = dice.map(() => rand(0, 1) < .5); return { mask: keep }; } return { cat: bc }; }
+      let bestM = -1, bestE = bv;
+      for (let m = 0; m < 31; m++) {
+        const fr = []; for (let k = 0; k < 5; k++) if (!(m & (1 << k))) fr.push(k);
+        const tot = Math.pow(6, fr.length); let sum = 0; const d = dice.slice();
+        for (let n = 0; n < tot; n++) { let x = n; for (const k of fr) { d[k] = x % 6 + 1; x = Math.floor(x / 6); } sum += bestCat(o, d)[1]; }
+        const e = sum / tot + rand(0, [0, .3, 0][L]); if (e > bestE + .01) { bestE = e; bestM = m; }
+      }
+      if (bestM < 0) return { cat: bc };
+      return { mask: dice.map((_, k) => !!(bestM & (1 << k))) };
+    }
     const TX = 230, C0 = 600, C1 = 730, Y = 192, RH = 24;
     function scoreCat() {
       sc[turn][ccur] = score(ccur, dice); api.beep(sc[turn][ccur] ? 'place' : 'no'); filled++;
@@ -5618,6 +6044,14 @@ registerGame({
       if (filled === 26) { phase = 'over'; t = 1.3; } else { turn = 1 - turn; phase = 'roll'; api.turn(turn); }
     }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (turn !== i || (phase !== 'roll' && phase !== 'choose')) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.7, 1.2) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        if (phase === 'roll') { startRoll(); return null; }
+        const pl = planYazy();
+        if (pl.cat != null) { ccur = pl.cat; mode = 'cat'; scoreCat(); } else { held = pl.mask; startRoll(); }
+        return null;
+      },
       touch: 'Tap to roll, tap dice to hold them, tap Roll again, tap a box to score it.',
       pointer(x, y, t) {
         if (over) return;
@@ -5689,6 +6123,16 @@ registerGame({
    ===================================================================== */
 
 /* shared: wrap an angle control + power charge. Returns a small aimer object */
+/* computer player: steer an aimer to P.a, wait P.w seconds, charge to power P.f, then let go. Returns the input to feed back. */
+function aimDrive(P, aim, dt) {
+  if (P.st === 0) {
+    let err = P.a - aim.ang; err = Math.atan2(Math.sin(err), Math.cos(err));
+    if (Math.abs(err) > .012) return { x: clamp(err * 6, -1, 1) };
+    P.w -= dt; if (P.w <= 0) P.st = 1; return null;
+  }
+  if (P.st === 1) { if (aim.pow < P.f) return { a: true }; P.st = 2; }
+  return null;
+}
 function makeAimer() {
   return { ang: 0, pow: 0, was: false, pdrag: false, ppow: 0, pf: -1, reset(a) { this.ang = a; this.pow = 0; this.was = false; this.pdrag = false; this.pf = -1; },
     /* mouse / touch: press, pull back from the ball like a slingshot, release to shoot */
@@ -5726,7 +6170,7 @@ function powerBar(g, x, y, w, p, c) { g.fillStyle = '#10202E'; D.rr(g, x, y, w, 
 
 /* ---------- Pool ---------- */
 registerGame({
-  id: 'pool', title: 'Pool', blurb: 'Eight-ball. Pot your group, then the black. Hold A to power up.',
+  id: 'pool', cpu: true, title: 'Pool', blurb: 'Eight-ball. Pot your group, then the black. Hold A to power up.',
   kind: 'turns', min: 2, max: 2, color: 2,
   help: 'Left and right rotate the cue (hold B to fine-tune). Hold A to charge, release to shoot. Pot a ball to claim solids or stripes, clear your group, then pot the 8. A scratch or a missed hit passes the turn.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="70" cy="64" r="30" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="70" cy="64" r="11" fill="#0F1923"/><circle cx="142" cy="46" r="18" fill="#0F1923"/><circle cx="148" cy="92" r="14" fill="none" stroke="#0F1923" stroke-width="5"/></svg>`; },
@@ -5734,7 +6178,7 @@ registerGame({
     const X0 = 100, Y0 = 130, TW = 760, TH = 380, R = 12, col = i => api.players[i].color;
     const POCK = [[X0, Y0], [X0 + TW / 2, Y0 - 8], [X0 + TW, Y0], [X0, Y0 + TH], [X0 + TW / 2, Y0 + TH + 8], [X0 + TW, Y0 + TH]];
     const BC = ['#fff', '#F6C11F', '#2B6FE0', '#E03A2E', '#7A3FC9', '#F58220', '#1F9F55', '#8E2B2B', '#10161C'];
-    let balls, turn, phase, grp, aim = makeAimer(), potted, firstHit, rollT, over, endT, winner, msg, note, noteT;
+    let simming = false, balls, turn, phase, grp, aim = makeAimer(), potted, firstHit, rollT, over, endT, winner, msg, note, noteT;
     const own = (i, b) => b.id !== 0 && b.id !== 8 && grp[i] && (grp[i] === 'S') === (b.id < 8);
     const ownLeft = i => balls.filter(b => b.alive && own(i, b)).length;
     function ball(id, x, y) { return { id, x, y, vx: 0, vy: 0, alive: true }; }
@@ -5744,7 +6188,7 @@ registerGame({
       for (let s = 0; s < n; s++) {
         for (const b of balls) if (b.alive) {
           b.x += b.vx * h; b.y += b.vy * h;
-          for (const p of POCK) if (Math.hypot(b.x - p[0], b.y - p[1]) < 23) { b.alive = false; potted.push(b.id); api.beep('hit'); break; }
+          for (const p of POCK) if (Math.hypot(b.x - p[0], b.y - p[1]) < 23) { b.alive = false; potted.push(b.id); if (!simming) api.beep('hit'); break; }
           if (!b.alive) continue;
           if (b.x < X0 + R) { b.x = X0 + R; b.vx = Math.abs(b.vx) * .8; } if (b.x > X0 + TW - R) { b.x = X0 + TW - R; b.vx = -Math.abs(b.vx) * .8; }
           if (b.y < Y0 + R) { b.y = Y0 + R; b.vy = Math.abs(b.vy) * .8; } if (b.y > Y0 + TH - R) { b.y = Y0 + TH - R; b.vy = -Math.abs(b.vy) * .8; }
@@ -5772,7 +6216,44 @@ registerGame({
       phase = 'aim'; aim.reset(turn === 0 ? 0 : Math.PI); aim.ang = Math.atan2(balls[0].y - (Y0 + TH / 2), 0) * 0; aimAtNearest();
     }
     function aimAtNearest() { const c = balls[0]; let best = null, bd = 1e9; for (const b of balls) if (b.alive && b.id !== 0) { const d = Math.hypot(b.x - c.x, b.y - c.y); if (d < bd) { bd = d; best = b; } } if (best) aim.ang = Math.atan2(best.y - c.y, best.x - c.x); }
+    function simShot(ang, f) {
+      const sb = balls, sp = potted, sf = firstHit; simming = true;
+      balls = sb.map(b => Object.assign({}, b)); potted = []; firstHit = -1;
+      const c = balls[0], s = 160 + f * 1250; c.vx = Math.cos(ang) * s; c.vy = Math.sin(ang) * s;
+      for (let k = 0; k < 420; k++) { physics(1 / 30); if (balls.every(b => !b.alive || (b.vx === 0 && b.vy === 0))) break; }
+      const r = { potted, firstHit, cueAlive: balls[0].alive }; balls = sb; potted = sp; firstHit = sf; simming = false; return r;
+    }
+    function rateShot(r) {
+      const real = r.potted.filter(id => id > 0 && id !== 8), scratch = !r.cueAlive; let v = 0;
+      if (r.potted.includes(8)) { const clear = ownLeft(turn) === 0 && grp[turn] && !scratch && real.length === 0; return clear ? 1000 : -1000; }
+      if (scratch) v -= 40;
+      if (r.firstHit === -1) v -= 40; else if (grp[turn]) { if (ownLeft(turn) > 0 && !own(turn, { id: r.firstHit })) v -= 25; else if (ownLeft(turn) === 0 && r.firstHit !== 8) v -= 25; } else if (r.firstHit === 8) v -= 25;
+      for (const id of real) v += (!grp[turn] || own(turn, { id })) ? 10 : -8;
+      return v;
+    }
+    function planShot() {
+      const c = balls[0], L = api.cpu, cand = [];
+      const targets = balls.filter(b => b.alive && b.id !== 0 && (grp[turn] ? (ownLeft(turn) === 0 ? b.id === 8 : own(turn, b)) : b.id !== 8));
+      for (const b of targets) for (const p of POCK) {
+        const dx = p[0] - b.x, dy = p[1] - b.y, d = Math.hypot(dx, dy) || 1, gx = b.x - dx / d * 2 * R, gy = b.y - dy / d * 2 * R;
+        const ax = gx - c.x, ay = gy - c.y, ad = Math.hypot(ax, ay) || 1;
+        if ((ax * dx + ay * dy) / (ad * d) < .25) continue;
+        cand.push(Math.atan2(ay, ax));
+      }
+      if (!cand.length) for (const b of targets) cand.push(Math.atan2(b.y - c.y, b.x - c.x));
+      let best = null, bs = -1e9; const pool = [];
+      for (const a of cand) for (const f of [.4, .62, .85]) { const v = rateShot(simShot(a, f)) + rand(0, [14, 3, .5][L]); pool.push([v, a, f]); if (v > bs) { bs = v; best = [a, f]; } }
+      if (L === 0 && pool.length > 3) { pool.sort((x, y) => y[0] - x[0]); const pk = pool[irand(Math.min(5, pool.length))]; best = [pk[1], pk[2]]; }
+      if (!best) { const t0 = balls.find(b => b.alive && b.id !== 0); best = [t0 ? Math.atan2(t0.y - c.y, t0.x - c.x) : 0, .5]; }
+      return best;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const L = api.cpu;
+        if (!Z[i]) { const b = planShot(); Z[i] = { a: b[0] + rand(-1, 1) * [.04, .012, .003][L], f: clamp(b[1] + rand(-1, 1) * [.12, .05, .015][L], .1, 1), w: rand(.5, 1.1), st: 0 }; }
+        return aimDrive(Z[i], aim, dt);
+      },
       touch: 'Press, pull back from the cue ball and let go to shoot. The farther you pull, the harder.',
       pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, balls[0].x, balls[0].y); },
       reset() {
@@ -5821,7 +6302,7 @@ registerGame({
 
 /* ---------- Minigolf ---------- */
 registerGame({
-  id: 'golf', title: 'Minigolf', blurb: 'Three holes, one ball each. Fewest strokes wins.',
+  id: 'golf', cpu: true, title: 'Minigolf', blurb: 'Three holes, one ball each. Fewest strokes wins.',
   kind: 'turns', min: 2, max: 2, color: 3,
   help: 'Left and right aim (hold B for fine aim). Hold A to charge the putt and release to hit. The ball only drops if it is rolling slowly enough. Seven strokes is the limit on a hole.',
   icon() { return `<svg viewBox="0 0 200 125"><ellipse cx="144" cy="98" rx="18" ry="7" fill="#0F1923"/><path d="M144 98V28l30 10-30 10" fill="none" stroke="#0F1923" stroke-width="5" stroke-linejoin="round"/><circle cx="52" cy="92" r="11" fill="#0F1923"/><path d="M70 82c18-10 38-24 56-24" fill="none" stroke="#0F1923" stroke-width="4" stroke-dasharray="3 9" stroke-linecap="round"/></svg>`; },
@@ -5837,7 +6318,36 @@ registerGame({
     function startHole() { const t0 = H().tee; ball = [{ x: t0[0], y: t0[1], vx: 0, vy: 0 }, { x: t0[0], y: t0[1], vx: 0, vy: 0 }]; strokes = [0, 0]; done = [false, false]; phase = 'aim'; aim.reset(0); aimAtHole(); api.turn(turn); }
     function aimAtHole() { aim.ang = Math.atan2(H().hole[1] - ball[turn].y, H().hole[0] - ball[turn].x); }
     function nextTurn() { if (done[0] && done[1]) { phase = 'banner'; bannerT = 1.4; total[0] += strokes[0]; total[1] += strokes[1]; return; } turn = done[1 - turn] ? turn : 1 - turn; api.turn(turn); phase = 'aim'; aimAtHole(); }
+    function simPutt(ang, f) {
+      const b0 = ball[turn], b = { x: b0.x, y: b0.y, vx: Math.cos(ang) * (90 + f * 760), vy: Math.sin(ang) * (90 + f * 760) }, hl = H().hole, dt = 1 / 60, n = 5, h = dt / n;
+      for (let k = 0; k < 900; k++) {
+        for (let s = 0; s < n; s++) {
+          b.x += b.vx * h; b.y += b.vy * h;
+          if (b.x < PX + BR) { b.x = PX + BR; b.vx = Math.abs(b.vx) * .85; } if (b.x > PX + PW - BR) { b.x = PX + PW - BR; b.vx = -Math.abs(b.vx) * .85; }
+          if (b.y < PY + BR) { b.y = PY + BR; b.vy = Math.abs(b.vy) * .85; } if (b.y > PY + PH - BR) { b.y = PY + PH - BR; b.vy = -Math.abs(b.vy) * .85; }
+          for (const w of H().walls) circleVsRect(b, BR, w[0], w[1], w[2], w[3], .85);
+          const d = Math.hypot(b.x - hl[0], b.y - hl[1]), sp = Math.hypot(b.vx, b.vy);
+          if (d < HR && sp < 420) return { sink: true, x: hl[0], y: hl[1] };
+          else if (d < HR + 16 && sp < 420) { const kx = (hl[0] - b.x) / (d + 1e-6), ky = (hl[1] - b.y) / (d + 1e-6); b.vx += kx * 500 * h; b.vy += ky * 500 * h; }
+        }
+        const fr = Math.exp(-.9 * dt); b.vx *= fr; b.vy *= fr; const sp = Math.hypot(b.vx, b.vy); if (sp < 10) break; const kk = Math.max(0, sp - 30 * dt) / sp; b.vx *= kk; b.vy *= kk;
+      }
+      return { sink: false, x: b.x, y: b.y };
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const L = api.cpu;
+        if (!Z[i]) {
+          const hl = H().hole; let best = null, bs = 1e9;
+          for (let a = -Math.PI; a < Math.PI; a += .04) for (let f = .08; f <= 1; f += .06) {
+            const r = simPutt(a, f); let sc = r.sink ? -1000 + f * 20 : Math.hypot(r.x - hl[0], r.y - hl[1]) + (strokes[i] >= 6 ? 0 : 0);
+            sc += rand(0, 3); if (sc < bs) { bs = sc; best = [a, f]; }
+          }
+          best = best || [aim.ang, .6]; Z[i] = { a: best[0] + rand(-1, 1) * [.07, .025, .006][L], f: clamp(best[1] + rand(-1, 1) * [.1, .04, .01][L], .06, 1), w: rand(.4, 1), st: 0 };
+        }
+        return aimDrive(Z[i], aim, dt);
+      },
       touch: 'Press, pull back from the ball and let go to putt. The farther you pull, the harder.',
       pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, ball[turn].x, ball[turn].y); },
       reset(r) { hi = 0; total = [0, 0]; turn = r % 2; over = false; endT = 0; t = 0; winner = -1; startHole(); },
@@ -5891,7 +6401,7 @@ registerGame({
 
 /* ---------- Cup Pong ---------- */
 registerGame({
-  id: 'cuppong', title: 'Cup Pong', blurb: 'Time two meters to land the ball in your rival\'s cups.',
+  id: 'cuppong', cpu: true, title: 'Cup Pong', blurb: 'Time two meters to land the ball in your rival\'s cups.',
   kind: 'turns', min: 2, max: 2, color: 1,
   help: 'Press A once to freeze the sideways sweep, press A again to freeze the distance. The ball lands where the two lines cross. Clear all six enemy cups to win.',
   icon() { let s = ''; [[70, 36], [100, 36], [130, 36], [85, 66], [115, 66], [100, 96]].forEach(([x, y]) => { s += `<path d="M${x - 12} ${y - 14}h24l-4 26h-16z" fill="none" stroke="#0F1923" stroke-width="4" stroke-linejoin="round"/>`; }); return `<svg viewBox="0 0 200 125">${s}</svg>`; },
@@ -5901,6 +6411,16 @@ registerGame({
     let cups, turn, phase, t, lockX, lockY, throwT, hitIdx, over, endT, winner, thrown, msg, flash;
     const sweepX = () => 480 + 190 * Math.sin(t * (1.9 + thrown[turn] * .06)), sweepY = () => 190 - 100 * Math.cos(t * (2.3 + thrown[turn] * .07));
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i || (phase !== 'x' && phase !== 'y')) { if (phase !== 'x' && phase !== 'y') Z[i] = null; return null; }
+        const z = Z[i] || (Z[i] = { tx: null, p: false }), L = api.cpu;
+        if (z.p) { z.p = false; return null; }
+        if (z.tx == null) { const left = POS.filter((p, k) => cups[1 - i][k]); const c = left[irand(0, left.length - 1)]; z.tx = c[0] + rand(-1, 1) * [14, 6, 1][L]; z.ty = c[1] + rand(-1, 1) * [14, 6, 1][L]; }
+        const tol = [20, 10, 5][L];
+        if (phase === 'x' && Math.abs(sweepX() - z.tx) < tol) { z.p = true; return { a: true }; }
+        if (phase === 'y' && Math.abs(sweepY() - z.ty) < tol) { z.p = true; return { a: true }; }
+        return null;
+      },
       tapA: true, touch: 'Click or tap to stop each meter.',
       reset(r) { cups = [Array(6).fill(true), Array(6).fill(true)]; turn = r % 2; phase = 'x'; t = 0; thrown = [0, 0]; over = false; endT = 0; winner = -1; msg = ''; flash = 0; api.turn(turn); },
       update(dt) {
@@ -5953,7 +6473,7 @@ registerGame({
 
 /* ---------- Archery ---------- */
 registerGame({
-  id: 'archery', title: 'Archery', blurb: 'Five arrows each. Fight the sway and the wind. Hold B to steady.',
+  id: 'archery', cpu: true, title: 'Archery', blurb: 'Five arrows each. Fight the sway and the wind. Hold B to steady.',
   kind: 'turns', min: 2, max: 2, color: 3,
   help: 'Nudge the aim with the stick, hold B to steady your breath (it runs out), and press A to loose the arrow. Wind pushes the arrow, so aim against the arrow shown. Highest total after five arrows each wins.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="86" cy="62" r="48" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="86" cy="62" r="30" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="86" cy="62" r="12" fill="#0F1923"/><path d="M96 52l86-34M170 12l12 6-6 12" fill="none" stroke="#0F1923" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`; },
@@ -5964,6 +6484,18 @@ registerGame({
     const sway = () => { const k = 1; return [Math.sin(t * 1.7 + ph) * 46 + Math.sin(t * 3.3 + ph * 2) * 20, Math.cos(t * 1.3 + ph * 1.5) * 38 + Math.sin(t * 2.9) * 16].map(v => v * k); };
     function nextArrow() { shootNow = false; wind = [irand(-40, 40), irand(-24, 24)]; t = 0; ph = irand(0, 600) / 100; ox = oy = 0; breath = 1; }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i || phase !== 'aim') { Z[i] = null; return null; }
+        const z = Z[i] || (Z[i] = { w: rand(.5, 1.2), p: false }), L = api.cpu;
+        if (z.p) { z.p = false; return null; }
+        const hold = L > 0 && breath > .12, k = hold ? .3 : 1, sw = sway();
+        const tx = -wind[0] + rand(-1, 1) * 0, ty = -wind[1] - 14;
+        const ex = tx - ox, ey = ty - oy; let x = clamp(ex / 25, -1, 1), y = clamp(ey / 25, -1, 1);
+        const px = ox + sw[0] * k + wind[0], py = oy + sw[1] * k + wind[1] + 14, err = Math.hypot(px, py);
+        z.w -= dt;
+        if (z.w <= 0 && err < [48, 24, 11][L] && Math.hypot(ex, ey) < 40) { z.p = true; return { a: true, b: hold }; }
+        return { x, y, b: hold };
+      },
       touch: 'Move to aim, click or lift your finger to loose the arrow. Right-click or a second finger holds your breath.',
       pointer(x, y, t) {
         if (phase !== 'aim' || over) return;
@@ -6011,7 +6543,7 @@ registerGame({
 
 /* ---------- Sling Puck ---------- */
 registerGame({
-  id: 'slingpuck', title: 'Sling Puck', blurb: 'Flick pucks at the bullseye and knock your rival off the board.',
+  id: 'slingpuck', cpu: true, title: 'Sling Puck', blurb: 'Flick pucks at the bullseye and knock your rival off the board.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Left and right aim, hold A to stretch the sling and release to fire. Four pucks each. Pucks that slide off the board are gone. Closest to the centre scores most.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="100" cy="46" r="36" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="100" cy="46" r="18" fill="none" stroke="#0F1923" stroke-width="4"/><circle cx="100" cy="46" r="5" fill="#0F1923"/><circle cx="100" cy="106" r="11" fill="#0F1923"/><path d="M100 94V66" stroke="#0F1923" stroke-width="4" stroke-dasharray="3 7" stroke-linecap="round"/></svg>`; },
@@ -6021,7 +6553,33 @@ registerGame({
     let pucks, turn, count, phase, aim = makeAimer(), over, endT, winner, rollT, cur, note, noteT;
     const pts = p => { const d = Math.hypot(p.x - CX, p.y - CY); for (const [r, v] of RING) if (d < r + PR * .6) return v; return 0; };
     const total = i => pucks.filter(p => p.alive && p.o === i).reduce((a, p) => a + pts(p), 0);
+    function simPuck(ang, f, me) {
+      const ps = pucks.map(p => ({ x: p.x, y: p.y, vx: p.vx, vy: p.vy, o: p.o, alive: p.alive }));
+      ps.push({ x: SX, y: SY, vx: Math.cos(ang) * (260 + f * 1150), vy: Math.sin(ang) * (260 + f * 1150), o: me, alive: true });
+      const dt = 1 / 45, n = 3, h = dt / n;
+      for (let k = 0; k < 400; k++) {
+        for (let s = 0; s < n; s++) {
+          for (const p of ps) if (p.alive) { p.x += p.vx * h; p.y += p.vy * h; }
+          for (let i = 0; i < ps.length; i++) if (ps[i].alive) for (let j = i + 1; j < ps.length; j++) if (ps[j].alive) bumpBalls(ps[i], ps[j], PR, .9);
+        }
+        let still = true;
+        for (const p of ps) if (p.alive) { if (p.x < BX - 6 || p.x > BX + BW + 6 || p.y < BY - 6 || p.y > BY + BH + 30) p.alive = false; const fr = Math.exp(-1.15 * dt); p.vx *= fr; p.vy *= fr; if (Math.hypot(p.vx, p.vy) < 6) p.vx = p.vy = 0; else still = false; }
+        if (still) break;
+      }
+      let mine = 0, theirs = 0; for (const p of ps) if (p.alive) { const v = pts(p); if (p.o === me) mine += v; else theirs += v; }
+      return mine - theirs;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const L = api.cpu;
+        if (!Z[i]) {
+          let best = null, bs = -1e9;
+          for (let a = -Math.PI / 2 - .8; a <= -Math.PI / 2 + .8; a += .08) for (let f = .2; f <= 1; f += .07) { const sc = simPuck(a, f, i) + rand(0, .5); if (sc > bs) { bs = sc; best = [a, f]; } }
+          best = best || [-Math.PI / 2, .6]; Z[i] = { a: clamp(best[0] + rand(-1, 1) * [.08, .03, .008][L], -Math.PI / 2 - .8, -Math.PI / 2 + .8), f: clamp(best[1] + rand(-1, 1) * [.1, .04, .01][L], .12, 1), w: rand(.4, 1), st: 0 };
+        }
+        return aimDrive(Z[i], aim, dt);
+      },
       touch: 'Press, pull back from the launch spot and let go to fling the puck.',
       pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, SX, SY); },
       reset(r) { pucks = []; turn = r % 2; count = [0, 0]; phase = 'aim'; aim.reset(-Math.PI / 2); over = false; endT = 0; winner = -1; rollT = 0; note = ''; noteT = 0; api.turn(turn); },
@@ -6071,20 +6629,31 @@ registerGame({
 
 /* ---------- Tower Stack ---------- */
 registerGame({
-  id: 'stack', title: 'Tower Stack', blurb: 'Drop blocks onto one shared tower. Miss and the tower is yours to lose.',
-  kind: 'turns', min: 2, max: 2, color: 2,
-  help: 'A block slides back and forth. Press A to drop it. Only the part that overlaps the tower stays, so the tower gets narrower. If you miss completely, you lose. Land dead centre to keep the full width.',
+  id: 'stack', cpu: true, title: 'Tower Stack', blurb: 'Drop blocks onto one shared tower. Miss and the tower is yours to lose.',
+  kind: 'turns', min: 2, max: 4, color: 2,
+  help: 'A block slides back and forth. Press A to drop it. Only the part that overlaps the tower stays, so the tower gets narrower. If you miss completely, you are out and the rest play on. Land dead centre to keep the full width.',
   icon() { let s = ''; [[60, 100, 80], [66, 78, 70], [72, 56, 64], [78, 34, 56]].forEach(([x, y, w], i) => { s += `<rect x="${x}" y="${y}" width="${w}" height="20" rx="3" fill="${i % 2 ? 'none' : '#0F1923'}" stroke="#0F1923" stroke-width="4"/>`; }); return `<svg viewBox="0 0 200 125">${s}</svg>`; },
   create(api) {
     const BH = 28, FL = 170, FR = 790, GY = 540, col = i => api.players[i].color;
-    let tower, turn, t, cur, falls, over, endT, winner, perfect, note, noteT, drop, cam;
+    let tower, turn, t, cur, falls, over, endT, winner, perfect, note, noteT, drop, cam, alive; const n = api.n;
+    const nextAlive = () => { let k = turn; for (let j = 0; j < n; j++) { k = (k + 1) % n; if (alive[k]) break; } return k; };
     const top = () => tower[tower.length - 1];
     const tri = (u, a, b) => { const p = u % 2; return a + (p < 1 ? p : 2 - p) * (b - a); };
     const speed = () => 1.1 + Math.min(tower.length, 25) * .06;
     function curX() { return tri(t * speed(), FL, FR - top().w); }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); const z = Z[i] || (Z[i] = { off: 0, last: -1, held: false });
+        if (over || turn !== i) { z.held = false; return null; }
+        if (z.held) { z.held = false; return null; }
+        if (z.last !== tower.length) { z.last = tower.length; z.off = rand(-1, 1) * [22, 9, 2.5][api.cpu]; }
+        const tp = top(), x1 = tri((t + dt) * speed(), FL, FR - tp.w), x2 = tri((t + 2 * dt) * speed(), FL, FR - tp.w);
+        const tgt = tp.x + z.off, step = Math.abs(x2 - x1);
+        if (Math.abs(x1 - tgt) <= Math.max(3, step * .5)) { z.held = true; return { a: true }; }
+        return null;
+      },
       tapA: true, touch: 'Click or tap to drop the block.',
-      reset(r) { tower = [{ x: 480 - 130, w: 260, o: -1 }]; turn = r % 2; t = 0; falls = []; over = false; endT = 0; winner = -1; perfect = 0; note = ''; noteT = 0; cam = 0; api.turn(turn); },
+      reset(r) { tower = [{ x: 480 - 130, w: 260, o: -1 }]; alive = Array(n).fill(true); turn = r % n; t = 0; falls = []; over = false; endT = 0; winner = -1; perfect = 0; note = ''; noteT = 0; cam = 0; api.turn(turn); },
       update(dt) {
         noteT -= dt; falls.forEach(f => { f.vy += 1400 * dt; f.y += f.vy * dt; }); falls = falls.filter(f => f.y < 900);
         const want = Math.max(0, (tower.length - 9) * BH); cam += (want - cam) * Math.min(1, dt * 5);
@@ -6092,14 +6661,14 @@ registerGame({
         t += dt;
         if (api.input(turn).pa) {
           const tp = top(), x = curX(), l = Math.max(x, tp.x), r = Math.min(x + tp.w, tp.x + tp.w), ov = r - l;
-          if (ov < 3) { falls.push({ x, y: GY - (tower.length) * BH, w: tp.w, vy: 0, o: turn }); over = true; endT = 1.1; winner = 1 - turn; api.beep('die'); return; }
+          if (ov < 3) { falls.push({ x, y: GY - (tower.length) * BH, w: tp.w, vy: 0, o: turn }); api.beep('die'); alive[turn] = false; const left = alive.map((a, k) => a ? k : -1).filter(k => k >= 0); if (left.length <= 1) { over = true; endT = 1.1; winner = left.length ? left[0] : -1; } else { note = api.players[turn].name + ' is out'; noteT = 1.4; turn = nextAlive(); api.turn(turn); t = 0; } return; }
           if (Math.abs(x - tp.x) < 6) { tower.push({ x: tp.x, w: tp.w, o: turn }); perfect++; note = perfect > 1 ? `Perfect x${perfect}` : 'Perfect'; noteT = 1; api.beep('win'); }
           else {
             perfect = 0; tower.push({ x: l, w: ov, o: turn }); api.beep('place');
             if (x < tp.x) falls.push({ x, y: GY - tower.length * BH, w: l - x, vy: 0, o: turn }); else falls.push({ x: r, y: GY - tower.length * BH, w: x + tp.w - r, vy: 0, o: turn });
           }
           if (tower[tower.length - 1].w < 10) { over = true; endT = 1.1; winner = turn; return; }
-          turn = 1 - turn; api.turn(turn); t = 0;
+          turn = nextAlive(); api.turn(turn); t = 0;
         }
       },
       draw(g) {
@@ -6111,6 +6680,7 @@ registerGame({
         D.text(g, tower.length - 1, 110, 120, 70, SCR.fg); D.text(g, 'blocks', 110, 164, 16, SCR.dim, 'center', 600);
         if (noteT > 0) D.text(g, note, W - 120, 120, 26, '#FFC933');
         if (!over) D.text(g, 'Click or tap to drop', W / 2, 572, 18, SCR.dim, 'center', 600);
+        if (n > 2) for (let i = 0; i < n; i++) D.text(g, api.players[i].name + (alive[i] ? '' : ' (out)'), 24, 215 + i * 22, 15, alive[i] ? col(i) : SCR.dim, 'left', 700);
       }
     };
   }
@@ -6118,7 +6688,7 @@ registerGame({
 
 /* ---------- Fruit Merge ---------- */
 registerGame({
-  id: 'fruitmerge', title: 'Fruit Merge', blurb: 'Drop fruit into your jar. Matching fruit merge into bigger ones. Do not overflow.',
+  id: 'fruitmerge', cpu: true, title: 'Fruit Merge', blurb: 'Drop fruit into your jar. Matching fruit merge into bigger ones. Do not overflow.',
   kind: 'live', min: 2, max: 2, color: 0,
   help: 'Move left and right and press A to drop the next fruit. Two of the same kind merge into the next size up. If your pile stays above the red line for two seconds you lose. When 80 seconds are up, the higher score wins.',
   icon() { return `<svg viewBox="0 0 200 125"><path d="M50 14v90h100V14" fill="none" stroke="#0F1923" stroke-width="5" stroke-linejoin="round"/><circle cx="82" cy="88" r="14" fill="#0F1923"/><circle cx="116" cy="84" r="18" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="100" cy="52" r="10" fill="#0F1923"/></svg>`; },
@@ -6149,7 +6719,22 @@ registerGame({
       if (gone.size) P.f = f.filter(b => !gone.has(b)).concat(add);
     }
     return {
-
+      ai(i) {
+        const P = pl[i], S = this.s || (this.s = []), st = S[i] || (S[i] = { p: false, tx: null, tm: 0 }); if (!P || over) return null;
+        if (st.p) { st.p = false; return null; }
+        const L = api.cpu, x0 = jx(i), lo = x0 + RAD[P.next], hi = x0 + JW - RAD[P.next];
+        st.tm -= 1 / 60;
+        if (st.tx == null || st.tm <= 0) {
+          /* aim above a matching fruit when there is one, otherwise the lowest part of the pile */
+          let best = null, bs = 1e9; const same = P.f.filter(b => b.l === P.next && b.age > .6);
+          if (same.length && rand() < [.5, .8, .95][L]) { const b = same.reduce((u, v) => v.y < u.y ? v : u, same[0]); best = b.x + rand(-4, 4); }
+          else { for (let k = 0; k < 9; k++) { const cx = lo + (hi - lo) * k / 8; let top = JB; for (const b of P.f) if (Math.abs(b.x - cx) < RAD[b.l] + RAD[P.next]) top = Math.min(top, b.y - RAD[b.l]); const sc = -top + rand(0, [90, 40, 12][L]); if (sc < bs || best == null) { bs = sc; best = cx; } } }
+          st.tx = clamp(best, lo, hi); st.tm = rand(.9, 1.6);
+        }
+        const dx = st.tx - P.x; if (Math.abs(dx) > 7) return { x: Math.sign(dx) };
+        if (P.cd <= 0) { st.p = true; st.tx = null; return { a: true }; }
+        return null;
+      },
       dragAxes: 'x', dragFire: 'release', drag: i => ({ x: pl[i].x, y: 0 }),
       reset() {
         pl = [0, 1].map(i => ({ f: [], x: jx(i) + JW / 2, cd: .4, next: irand(0, 2), score: 0, warn: 0 }));
@@ -6189,7 +6774,7 @@ registerGame({
    Color Wars: a chain-reaction territory game with animated cascades
    ===================================================================== */
 registerGame({
-  id: 'colorwars', title: 'Color Wars', blurb: 'Fill cells until they burst and paint your neighbours. Chain reactions steal the board.',
+  id: 'colorwars', cpu: true, title: 'Color Wars', blurb: 'Fill cells until they burst and paint your neighbours. Chain reactions steal the board.',
   kind: 'turns', min: 2, max: 4, color: 1,
   help: 'Pick an empty cell or one of your own and add an orb. A cell bursts when it holds as many orbs as it has neighbours, sending one orb to each and turning them your colour. Chains can flip the whole board. Wipe out every rival to win. Cells that shake are about to burst.',
   icon() {
@@ -6234,7 +6819,28 @@ registerGame({
       shake = Math.min(14, shake + 3 + boom.length); api.beep(boom.length > 3 ? 'die' : 'hit'); waves++;
       return true;
     }
+    function pickCell() {
+      const L = api.cpu; let best = null, bs = -1e9;
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        const x = cells[r][c]; if (x.o !== -1 && x.o !== turn) continue;
+        const k = cap(r, c), crit = x.n + 1 >= k; let v = rand(0, [6, 1.2, .3][L]);
+        let enemyCrit = 0, enemyAdj = 0;
+        for (const [rr, cc2] of nb(r, c)) { const y = cells[rr][cc2]; if (y.o !== -1 && y.o !== turn) { enemyAdj++; if (y.n >= cap(rr, cc2) - 1) enemyCrit++; } }
+        if (L > 0) {
+          if (crit) v += 1 + enemyAdj * 2.5 - (x.o === turn ? 0 : 0); else v -= enemyCrit * 3.5;
+          if (x.o === -1) v += (5 - k) * .9 + (enemyAdj ? -1 : 0); else v += x.n === k - 2 && !enemyCrit ? .8 : 0.3;
+          if (x.o === turn && x.n >= k - 1 && !enemyAdj) v -= 1.5;
+        } else v += x.o === turn ? 0 : 1;
+        if (v > bs) { bs = v; best = [r, c]; }
+      }
+      return best;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || phase !== 'aim' || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.45, .95) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const p = pickCell(); if (p) { cr = p[0]; cc = p[1]; place(p[0], p[1]); } return null;
+      },
       reset(rd) {
         cells = Array.from({ length: R }, () => Array.from({ length: C }, () => ({ o: -1, n: 0 })));
         turn = rd % n; moved = Array(n).fill(false); phase = 'aim'; t = 0; anim = 0; parts = []; rings = []; shake = 0; cr = 2; cc = 4; over = false; endT = 0; winner = -1; waves = 0; last = null; msg = ''; api.turn(turn);
@@ -6305,7 +6911,7 @@ registerGame({
 
 /* ---------- Spinner War ---------- */
 registerGame({
-  id: 'spinner', title: 'Spinner War', blurb: 'Battle tops in a bowl. Knock rivals out and outlast their spin.',
+  id: 'spinner', cpu: true, title: 'Spinner War', blurb: 'Battle tops in a bowl. Knock rivals out and outlast their spin.',
   kind: 'live', min: 2, max: 4, color: 0,
   help: 'Steer your top. The bowl pulls everyone to the middle, so crashes decide it. Press A for a burst of speed (costs spin). Fall out of the bowl or run out of spin and you are done.',
   icon() { return `<svg viewBox="0 0 200 125"><ellipse cx="100" cy="68" rx="62" ry="34" fill="none" stroke="#0F1923" stroke-width="5"/><path d="M60 54l80 28M140 54L60 82" stroke="#0F1923" stroke-width="5" stroke-linecap="round"/><circle cx="100" cy="68" r="9" fill="#0F1923"/></svg>`; },
@@ -6313,6 +6919,17 @@ registerGame({
     const CX = 480, CY = 310, AR = 250, TR = 24, n = api.n, col = i => api.players[i].color;
     let tops, over, endT, winner, t, msg, anim;
     return {
+      ai(i) {
+        const p = tops[i]; if (!p || !p.alive || over) return null; const L = api.cpu, S = this.s || (this.s = []), st = S[i] || (S[i] = { p: false }); if (st.p) { st.p = false; return null; }
+        let tg = null, bd = 1e9; tops.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.hypot(o.x - p.x, o.y - p.y); if (d < bd) { bd = d; tg = o; } } });
+        const rc = Math.hypot(p.x - CX, p.y - CY); let dx, dy;
+        if (rc > AR - [110, 80, 60][L] && (p.vx * (p.x - CX) + p.vy * (p.y - CY)) > -20) { dx = CX - p.x; dy = CY - p.y; }
+        else if (tg) { /* lead the target a little, then drive through it toward the far edge */ dx = tg.x + tg.vx * .15 - p.x; dy = tg.y + tg.vy * .15 - p.y; }
+        else { dx = CX - p.x; dy = CY - p.y; }
+        const m = Math.hypot(dx, dy) || 1; let a = false;
+        if (tg && bd < 95 && p.cd <= 0 && p.spin > .3 && rc < AR - 90 && rand() < [.02, .05, .1][L]) { a = true; st.p = true; }
+        return { x: dx / m, y: dy / m, a };
+      },
       dragAxes: 'xy', drag: i => tops[i].alive ? tops[i] : null, touch: 'Move your finger or mouse and your top chases it. Click or press for a speed burst.',
       reset() {
         tops = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; tops.push({ x: CX + Math.cos(a) * 160, y: CY + Math.sin(a) * 160, vx: 0, vy: 0, spin: 1, cd: 0, alive: true, fall: 0 }); }
@@ -6360,7 +6977,7 @@ registerGame({
 
 /* ---------- Triple (match three) ---------- */
 registerGame({
-  id: 'triple', title: 'Triple', blurb: 'Swap gems to make rows of three. Cascades score big. Eight moves each.',
+  id: 'triple', cpu: true, title: 'Triple', blurb: 'Swap gems to make rows of three. Cascades score big. Eight moves each.',
   kind: 'turns', min: 2, max: 2, color: 2,
   help: 'Press A on a gem, then move toward a neighbour and press A (or use the direction) to swap. A swap must make a row or column of three or more. Bigger matches and cascades score more. Highest score after eight moves each wins.',
   icon() { let s = ''; [[40, 30, 0], [80, 30, 1], [120, 30, 0], [40, 70, 1], [80, 70, 0], [120, 70, 1]].forEach(([x, y, f]) => { s += f ? `<rect x="${x - 14}" y="${y - 14}" width="28" height="28" rx="5" fill="none" stroke="#0F1923" stroke-width="5"/>` : `<circle cx="${x}" cy="${y}" r="15" fill="#0F1923"/>`; }); return `<svg viewBox="0 0 200 125">${s}<path d="M150 50l24 0-8-8m8 8l-8 8" stroke="#0F1923" stroke-width="5" fill="none" stroke-linecap="round"/></svg>`; },
@@ -6397,7 +7014,24 @@ registerGame({
       turn = 1 - turn; api.turn(turn); phase = 'aim';
       if (!hasMove(g0)) { build(); }
     }
+    function bestSwap() {
+      const L = api.cpu; let best = null, bs = -1e9;
+      for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) for (const [dr, dc] of [[0, 1], [1, 0]]) {
+        const r2 = r + dr, c2 = c + dc; if (r2 >= N || c2 >= N) continue;
+        swapB(g0, r, c, r2, c2); const m = matches(g0); let k = 0;
+        if (m) for (const row of m) for (const x of row) if (x) k++;
+        swapB(g0, r, c, r2, c2);
+        if (!m) continue; const v = k + rand(0, [6, 1.5, .2][L]) - (L === 0 ? k * .5 : 0) + (L === 2 ? (N - 1 - Math.max(r, r2)) * .0 : 0);
+        if (v > bs) { bs = v; best = [r, c, r2, c2]; }
+      }
+      return best;
+    }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || phase !== 'aim' || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.6, 1.2) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const m = bestSwap(); if (m) { cr = m[0]; cc = m[1]; trySwap(m[0], m[1], m[2], m[3]); } return null;
+      },
       reset(r) { build(); turn = r % 2; moves = [0, 0]; scores = [0, 0]; sel = null; phase = 'aim'; t = 0; chain = 0; gain = 0; over = false; endT = 0; winner = -1; cr = 3; cc = 3; anim = 0; flash = null; api.turn(turn); },
       update(dt) {
         anim += dt;
@@ -6439,7 +7073,7 @@ registerGame({
 
 /* ---------- Matching Numbers ---------- */
 registerGame({
-  id: 'numbers', title: 'Matching Numbers', blurb: 'Clear pairs that match or add to ten. Most pairs wins.',
+  id: 'numbers', cpu: true, title: 'Matching Numbers', blurb: 'Clear pairs that match or add to ten. Most pairs wins.',
   kind: 'turns', min: 2, max: 2, color: 1,
   help: 'Pick two numbers that are equal or add up to 10. They must be next to each other, or in the same row or column with only cleared squares between. B passes your turn. When no pair is left, most pairs wins.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 40l14-10v40M82 40c0-14 24-14 24 0 0 14-24 26-24 40h24"/><path d="M128 36c10-8 28 0 20 12l-18 22h26M150 96h20"/><path d="M60 100h50" stroke-dasharray="2 9"/></svg>`; },
@@ -6463,6 +7097,16 @@ registerGame({
       else { api.beep('no'); sel = [r, c]; }
     }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []); if (over || turn !== i) { Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.5, 1.1) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const cells = []; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) if (b[r][c]) cells.push([r, c]);
+        const pairs = []; for (let a = 0; a < cells.length; a++) for (let d = a + 1; d < cells.length; d++) if (valid(cells[a], cells[d])) pairs.push([cells[a], cells[d]]);
+        if (!pairs.length) { passes++; note = api.players[turn].name + ' passes'; noteT = 1; if (passes >= 2) { finish(); return null; } turn = 1 - turn; api.turn(turn); return null; }
+        let pick2 = pairs[rint(pairs.length)];
+        if (api.cpu > 0) { let bs = -1; for (const p of pairs) { const v = (p[0][0] !== p[1][0] && p[0][1] !== p[1][1] ? 0 : 1) + rand(0, api.cpu === 2 ? 1 : 3); if (v > bs) { bs = v; pick2 = p; } } }
+        sel = null; cr = pick2[1][0]; cc = pick2[1][1]; pick(pick2[0][0], pick2[0][1]); pick(pick2[1][0], pick2[1][1]); return null;
+      },
       reset(rd) {
         const vals = []; for (let i = 0; i < R * C / 2; i++) { const a = irand(1, 9), same = irand(0, 1); vals.push(a, same ? a : 10 - a); }
         const v = shuffle(vals); b = Array.from({ length: R }, (_, r) => Array.from({ length: C }, (_, c) => v[r * C + c]));
@@ -6496,7 +7140,7 @@ registerGame({
 
 /* ---------- Ball Run ---------- */
 registerGame({
-  id: 'ballrun', title: 'Ball Run', blurb: 'Roll your ball down the track, dodge the pegs, reach the line first.',
+  id: 'ballrun', cpu: true, title: 'Ball Run', blurb: 'Roll your ball down the track, dodge the pegs, reach the line first.',
   kind: 'live', min: 2, max: 2, color: 3,
   help: 'Steer left and right. Hold A to speed up. Hitting a peg or a bar slows you down. First ball over the finish line wins.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="70" cy="30" r="14" fill="#0F1923"/><path d="M70 50c0 20 30 22 30 42" fill="none" stroke="#0F1923" stroke-width="4" stroke-dasharray="3 9" stroke-linecap="round"/><circle cx="60" cy="86" r="10" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="140" cy="56" r="10" fill="none" stroke="#0F1923" stroke-width="5"/><path d="M110 108h60" stroke="#0F1923" stroke-width="5"/></svg>`; },
@@ -6504,6 +7148,19 @@ registerGame({
     const LW = 380, LX = [70, 510], LEN = 6400, SY = 430, col = i => api.players[i].color;
     let obs, ball, over, endT, winner, t;
     return {
+      ai(i) {
+        const b = ball[i]; if (!b || over) return null; const L = api.cpu, look = [150, 220, 310][L]; let o2 = null, tx = LW / 2;
+        for (const o of obs) {
+          const dy = o.y - b.y; if (dy < -40) continue; if (dy > look) break;
+          const hit = o.k === 'peg' ? Math.abs(o.x - b.x) < o.r + 34 : (b.x > o.x - 34 && b.x < o.x + o.w + 34);
+          if (hit) { o2 = o; break; }
+        }
+        if (!o2) return { x: clamp((LW / 2 - b.x) / 140, -.5, .5) * .6, a: true };
+        if (o2.k === 'peg') tx = b.x < o2.x ? o2.x - o2.r - 30 : o2.x + o2.r + 30;
+        else { const l = o2.x - 30, r = o2.x + o2.w + 30, okL = l >= 16, okR = r <= LW - 16; tx = okL && (!okR || Math.abs(b.x - l) < Math.abs(r - b.x)) ? l : r; }
+        tx = clamp(tx, 16, LW - 16); const dyo = o2.y - b.y;
+        return { x: clamp((tx - b.x) / 36, -1, 1), a: dyo > 90 && rand() < .95 || Math.abs(tx - b.x) < 24 && dyo > 40 };
+      },
       dragAxes: 'x', drag: i => ({ x: LX[i] + ball[i].x, y: 0 }),
       reset() {
         obs = []; for (let y = 700; y < LEN - 300; y += irand(150, 240)) { const k = irand(0, 2); if (k === 0) obs.push({ k: 'peg', y, x: irand(40, LW - 40), r: 20 }); else if (k === 1) { const w = irand(110, 170), x = irand(0, LW - w); obs.push({ k: 'bar', y, x, w, h: 20 }); } else { obs.push({ k: 'peg', y, x: irand(40, LW / 2), r: 18 }); obs.push({ k: 'peg', y: y + 30, x: irand(LW / 2, LW - 40), r: 18 }); } }
@@ -6544,7 +7201,7 @@ registerGame({
 
 /* ---------- Guess the Person ---------- */
 registerGame({
-  id: 'guesswho', title: 'Guess the Person', blurb: 'Pick a secret face, then ask yes or no questions to find your rival\'s.',
+  id: 'guesswho', cpu: true, title: 'Guess the Person', blurb: 'Pick a secret face, then ask yes or no questions to find your rival\'s.',
   kind: 'turns', min: 2, max: 2, color: 0,
   help: 'Each player secretly picks a face (look away while your rival picks). Then take turns: press B for the question list, choose one with up and down and press A. Faces that do not fit fade out. When you are sure, choose "Guess" while the cursor is on a face. A wrong guess loses.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><circle cx="70" cy="60" r="30"/><circle cx="60" cy="54" r="3" fill="#0F1923"/><circle cx="80" cy="54" r="3" fill="#0F1923"/><path d="M58 72c8 8 16 8 24 0"/><path d="M122 32c0-12 24-12 24 0 0 8-12 10-12 20M134 70v2" /></svg>`; },
@@ -6582,6 +7239,19 @@ registerGame({
       const ok = cur === secret[1 - turn]; over = true; endT = 1.2; winner = ok ? turn : 1 - turn; msg = ok ? `It was ${P[cur].nm}.` : `Not ${P[cur].nm}. It was ${P[secret[1 - turn]].nm}.`; api.beep(ok ? 'win' : 'die'); phase = 'over';
     }
     return {
+      ai(i, dt) {
+        const Z = this.zs || (this.zs = []);
+        if (over) return null;
+        if (phase === 'cover' && ptn === i) { if (coverT <= 0) tapGo = true; return null; }
+        if (phase === 'pick' && secret[i] < 0 && (sim || ptn === i)) { Z[i] = (Z[i] == null ? rand(.4, .9) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null; choose(i, rint(24)); return null; }
+        if (phase !== 'play' || turn !== i || menu) { if (phase !== 'play') Z[i] = null; return null; }
+        Z[i] = (Z[i] == null ? rand(.9, 1.6) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
+        const L = api.cpu, cand = []; for (let k = 0; k < 24; k++) if (!elim[turn][k]) cand.push(k);
+        if (cand.length <= 1 || (L === 0 && cand.length <= 3 && rand(0, 1) < .3)) { cur = cand.length ? cand[rint(cand.length)] : rint(24); guess(); return null; }
+        let best = 0, bs = 1e9;
+        for (let k = 0; k < Q.length; k++) { const yes = cand.filter(c => Q[k][1](P[c])).length; const v = Math.abs(yes - cand.length / 2) + (yes === 0 || yes === cand.length ? 50 : 0) + rand(0, [10, 2, .4][L]); if (v < bs) { bs = v; best = k; } }
+        ask(best); return null;
+      },
       reset(r) {
         phase = 'pick'; turn = r % 2; secret = [-1, -1]; elim = [Array(24).fill(false), Array(24).fill(false)]; cur = 0; pc = [0, 0]; ptn = 0; coverT = 0; tapGo = false; reps = [repeater(), repeater()];
         menu = false; mi = 0; note = ''; noteT = 0; over = false; endT = 0; winner = -1; msg = ''; gapT = 0; api.turn(sim ? -2 : 0);
@@ -6646,7 +7316,7 @@ registerGame({
 
 /* ---------- Nuts and Bolts ---------- */
 registerGame({
-  id: 'nutsbolts', title: 'Nuts & Bolts', blurb: 'Sort the nuts so every bolt holds one colour. Race your rival to the finish.',
+  id: 'nutsbolts', cpu: true, title: 'Nuts & Bolts', blurb: 'Sort the nuts so every bolt holds one colour. Race your rival to the finish.',
   kind: 'live', min: 2, max: 2, color: 2,
   help: 'Left and right choose a bolt. Press A to lift the top nut and A on another bolt to drop it. You can only drop on an empty bolt or onto the same colour. B puts it back. Both of you get the same puzzle.',
   icon() { let s = ''; [[50, 0], [100, 1], [150, 2]].forEach(([x, k]) => { s += `<path d="M${x} 24v82" stroke="#0F1923" stroke-width="5" stroke-linecap="round"/>`; for (let i = 0; i < 3 - k; i++) s += `<rect x="${x - 20}" y="${88 - i * 22}" width="40" height="16" rx="6" fill="${(i + k) % 2 ? 'none' : '#0F1923'}" stroke="#0F1923" stroke-width="4"/>`; }); return `<svg viewBox="0 0 200 125">${s}</svg>`; },
@@ -6656,7 +7326,30 @@ registerGame({
     const solved = pegs => pegs.every(p => p.length === 0 || (p.length === CAP && p.every(v => v === p[0])));
     const mk = () => ({ pegs: start.map(p => p.slice()), cur: 0, held: -1, from: -1, moves: 0, fin: false, flash: 0 });
     const tap = [-1, -1];
+    const uni = p => p.length > 0 && p.every(v => v === p[0]);
     return {
+      ai(i, dt) {
+        const S = st[i], Z = this.s || (this.s = []), z = Z[i] || (Z[i] = { d: .8, last: null }), L = api.cpu; if (!S || S.fin || over) return null;
+        z.d -= dt; if (z.d > 0) return null; z.d = [1.2, .75, .45][L] * (.8 + rand(0, .5));
+        const ok = (a, b) => a !== b && S.pegs[a].length > 0 && S.pegs[b].length < CAP && (S.pegs[b].length === 0 || S.pegs[b][S.pegs[b].length - 1] === S.pegs[a][S.pegs[a].length - 1]);
+        if (S.held < 0) {
+          let best = null, bs = -1e9;
+          for (let a = 0; a < NP; a++) for (let b = 0; b < NP; b++) {
+            if (!ok(a, b)) continue; const A = S.pegs[a], B = S.pegs[b]; if (z.last && z.last[0] === b && z.last[1] === a) continue;
+            if (uni(A) && A.length === CAP) continue;
+            let sc = rand(0, [8, 3, .5][L]);
+            if (B.length) sc += 10 + B.length * 2 + (uni(B) ? 4 : 0); else sc += uni(A) ? -30 : 2;
+            if (uni(A) && B.length) sc += 6; if (A.length > 1 && A[A.length - 2] === A[A.length - 1] && !B.length) sc -= 6;
+            if (sc > bs) { bs = sc; best = [a, b]; }
+          }
+          if (!best) return null;
+          z.mv = best; S.cur = best[0]; S.held = S.pegs[best[0]].pop(); S.from = best[0]; api.beep('select'); return null;
+        }
+        const b = z.mv ? z.mv[1] : S.from, p = S.pegs[b];
+        if (p.length < CAP && (p.length === 0 || p[p.length - 1] === S.held)) { S.cur = b; p.push(S.held); if (b !== S.from) S.moves++; z.last = z.mv; S.held = -1; api.beep('place'); if (solved(S.pegs)) { S.fin = true; api.beep('win'); } }
+        else { S.pegs[S.from].push(S.held); S.held = -1; }
+        return null;
+      },
       touch: 'Tap a bolt to lift its top nut, tap another bolt to drop it.',
       pointer(x, y, t, i) { if (t !== 'down') return; const x0 = i ? 510 : 50; if (x < x0 || x > x0 + 400 || y < 140 || y > 540) return; tap[i] = Math.min(NP - 1, Math.floor((x - x0) / (400 / NP))); },
       reset() {
