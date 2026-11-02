@@ -655,12 +655,12 @@ const PeerRoom = (() => {
     const touch = () => { cache = null; };
     const sendTo = (c, o) => { try { if (c && c.open) c.send(typeof o === 'string' ? o : JSON.stringify(o)); } catch (e) { } };
     const wire = c => {
-      conn = isHost ? conn : c; conns.add(c); c.u = null;
+      conn = isHost ? conn : c; conns.add(c); c.u = null; c.seenAt = Date.now();
       c.on('data', d => { try {
-        const o = typeof d === 'string' ? JSON.parse(d) : d;
+        const o = typeof d === 'string' ? JSON.parse(d) : d; c.seenAt = Date.now();
         if (o && o.p && o.p.u) {
           if (isHost) { c.u = o.p.u; for (const x of conns) if (x !== c) sendTo(x, JSON.stringify(o)); }
-          remotes.set(o.p.u, { presence: o.p, upd: ++ver, c }); touch();
+          remotes.set(o.p.u, { presence: o.p, upd: ++ver, c, seen: Date.now() }); touch();
         } else if (o && o.left) { remotes.delete(o.left); touch(); }
       } catch (e) { } });
       c.on('close', () => {
@@ -685,7 +685,7 @@ const PeerRoom = (() => {
       const c = peer.connect(hostId, { reliable: true }); wire(c);
       setTimeout(() => { if (!dead && conn === c && !c.open) { try { c.close(); } catch (e) { } conn = null; if (tries < 3) linkTo(); else detail = 'Could not link to the host. One of your networks may be blocking direct connections. Try Wi-Fi on both, or use a different network.'; } }, 14000);
     };
-    try { peer = await opened(() => new Peer(hostId, ICE)); isHost = true; detail = 'Matchmaking connected. Waiting for players to open the link. Keep this tab open.'; watch(peer); peer.on('connection', c => { if (conns.size >= 3) { try { c.close(); } catch (e) { } return; } detail = 'Player found. Linking...'; wire(c); }); }
+    try { peer = await opened(() => new Peer(hostId, ICE)); isHost = true; detail = 'Matchmaking connected. Waiting for players to open the link. Keep this tab open.'; watch(peer); peer.on('connection', c => { { const now = Date.now(); for (const x of [...conns]) if (x.seenAt && now - x.seenAt > 14000) { try { x.close(); } catch (e) { } conns.delete(x); for (const [u, r] of [...remotes]) if (r.c === x) { remotes.delete(u); for (const y of conns) sendTo(y, { left: u }); } touch(); } } if (conns.size >= 3) { try { c.close(); } catch (e) { } return; } detail = 'Player found. Linking...'; wire(c); }); }
     catch (e) {
       if (e && e.type === 'unavailable-id') { peer = await opened(() => new Peer(undefined, ICE)); watch(peer); linkTo(); }
       else { const er = Object.assign(new Error('net'), { code: 'network' }); er.type = (e && e.type) || 'unknown'; throw er; }
@@ -695,7 +695,7 @@ const PeerRoom = (() => {
       presence: async patch => { Object.assign(mine, patch); touch(); const m = JSON.stringify({ p: mine }); for (const c of conns) sendTo(c, m); },
       peers: () => {
         if (cache) return cache; const me = Object.freeze({ peer: myId, by: null, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: JSON.parse(JSON.stringify(mine)), updatedAt: ++ver });
-        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd }));
+        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd, seenAt: r.seen }));
         return (cache = Object.freeze(out));
       },
       onPeers() { return () => { }; }, onConnection() { return () => { }; },
@@ -715,7 +715,7 @@ const WsRoom = (() => {
     const connect = () => new Promise((res, rej) => {
       let opened = false; const w = new WebSocket(url); ws = w; const t = setTimeout(() => { if (!opened) { try { w.close(); } catch (e) { } rej({ type: 'timeout' }); } }, 10000);
       w.onopen = () => { opened = true; ever = true; clearTimeout(t); detail = remotes.size ? 'Linked.' : 'Connected. Waiting for players to open the link. Keep this tab open.'; send({ p: mine }); res(); };
-      w.onmessage = ev => { try { const o = JSON.parse(ev.data); if (o.p && o.p.u) { remotes.set(o.p.u, { presence: o.p, upd: ++ver }); touch(); detail = 'Linked.'; } else if (o.left) { remotes.delete(o.left); touch(); detail = 'A player left.'; } else if (o.full) { detail = 'This room is full.'; } } catch (e) { } };
+      w.onmessage = ev => { try { const o = JSON.parse(ev.data); if (o.p && o.p.u) { remotes.set(o.p.u, { presence: o.p, upd: ++ver, seen: Date.now() }); touch(); detail = 'Linked.'; } else if (o.left) { remotes.delete(o.left); touch(); detail = 'A player left.'; } else if (o.full) { detail = 'This room is full.'; } } catch (e) { } };
       w.onerror = () => { if (!opened) { clearTimeout(t); rej({ type: 'socket' }); } };
       w.onclose = () => { if (ws !== w || dead) return; clearTimeout(t); if (opened) { detail = 'Connection lost. Reconnecting...'; setTimeout(() => { if (!dead) connect().catch(() => { detail = 'Reconnecting...'; }); }, 1200); } };
     });
@@ -726,7 +726,7 @@ const WsRoom = (() => {
       presence: async patch => { Object.assign(mine, patch); touch(); send({ p: mine }); },
       peers: () => {
         if (cache) return cache; const me = Object.freeze({ peer: myId, by: null, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: JSON.parse(JSON.stringify(mine)), updatedAt: ++ver });
-        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd }));
+        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd, seenAt: r.seen }));
         return (cache = Object.freeze(out));
       },
       onPeers() { return () => { }; }, onConnection() { return () => { }; },
@@ -746,13 +746,16 @@ const Net = (() => {
 
   const getCap = () => capP || (capP = (async () => { try { return (window.claude && window.claude.use) ? await window.claude.use('room') : null; } catch (e) { return null; } })());
 
+  /* keep our presence fresh in the lobby so a tab that vanished without saying goodbye can be told apart from one that is still here */
+  if (typeof setInterval === 'function') setInterval(() => { try { if (nr && !mid) { dirty = true; flush(); } } catch (e) { } }, 4000);
   function roster() {
     if (!nr) return Object.assign(EMPTY(), { status: connecting ? 'connecting' : failed ? 'unavailable' : 'idle' });
     let ps = [];
     try { ps = nr.peers().filter(p => p.kind === 'viewer' && p.presence && p.presence.app === 'cc1' && p.presence.u); } catch (e) { }
+    { const now = Date.now(); ps = ps.filter(p => p.isMe || !p.seenAt || now - p.seenAt < 14000); }
     ps.sort((a, b) => (a.presence.t - b.presence.t) || (a.peer < b.peer ? -1 : 1));
     const list = ps.slice(0, MAXH), me = list.findIndex(p => p.isMe && p.sameTab);
-    const status = list.length < 2 ? 'waiting' : me < 0 ? 'full' : 'ready';
+    const status = list.length < 2 ? 'waiting' : me < 0 ? (list.length >= MAXH ? 'full' : 'waiting') : 'ready';
     if (status !== 'ready') return Object.assign(EMPTY(), { status });
     return { status, host: me === 0, me, remotes: list.filter((p, i) => i !== me), names: list.map(p => String(p.presence.nick || 'Player').slice(0, 14)), avs: list.map(p => p.presence.av || null), uids: list.map(p => p.presence.u) };
   }
@@ -6523,6 +6526,587 @@ registerGame({
         pops.forEach(q => { g.globalAlpha = clamp(q.t * 2, 0, 1); D.text(g, q.v, q.x, q.y, 24, q.c); g.globalAlpha = 1; });
         for (let i = 0; i < n; i++) { const x = 120 + i * 190; D.text(g, 'P' + (i + 1) + '  ' + score[i], x, 590, 20, col(i), 'center', 800); }
         D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Dead level') : Math.ceil(Math.max(0, t)), W - 70, 590, over ? 24 : 26, over && winner >= 0 ? col(winner) : (t < 10 ? '#FF6B4A' : SCR.dim), 'center', 800);
+      }
+    };
+  }
+});
+/* =====================================================================
+   INTENSE ARCADE: Light Trails, Skyfall, Hot Bomb
+   ===================================================================== */
+
+/* ---------- Light Trails ---------- */
+registerGame({
+  id: 'trails', cpu: true, title: 'Light Trails', blurb: 'Light cycles that leave walls behind. Box your rivals in. Last rider wins.',
+  kind: 'live', min: 2, max: 4, color: 3,
+  help: 'Steer with the stick or keys, or point where you want to go with the mouse or your finger. You cannot turn back on yourself. Hit a wall or any trail and you crash. Hold A for a burst of speed; it drains the boost bar, which refills while you ride normally. The grid gets faster as the round goes on. Last rider wins.',
+  touch: 'Point where you want to ride: your bike turns toward your finger or mouse. Press and hold for a boost.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M28 104V44h56v44h50V28h40"/><circle cx="174" cy="28" r="10" fill="#0F1923"/></svg>`; },
+  create(api) {
+    const COLS = 50, ROWS = 28, CS = 18, OX = 30, OY = 72, n = api.n, col = i => api.players[i].color;
+    const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]], G = .0475;
+    let grid, bikes, over, endT, winner, t, gt, tick, msg, parts, anim;
+    const inb = (c, r) => c >= 0 && r >= 0 && c < COLS && r < ROWS;
+    const free = (c, r) => inb(c, r) && grid[r * COLS + c] === -1;
+    function area(c, r, block) {
+      /* flood fill count, capped, from (c,r) */
+      const seen = new Uint8Array(COLS * ROWS), q = [c + r * COLS]; seen[q[0]] = 1; let k = 0;
+      while (k < q.length && q.length < 260) {
+        const v = q[k++], cc = v % COLS, rr = (v / COLS) | 0;
+        for (const [dx, dy] of DIRS) { const nc = cc + dx, nr = rr + dy, id = nr * COLS + nc; if (!inb(nc, nr) || seen[id] || grid[id] !== -1 || block.has(id)) continue; seen[id] = 1; q.push(id); }
+      }
+      return q.length;
+    }
+    return {
+      dragAxes: 'xy', drag: i => bikes[i] && bikes[i].alive ? { x: OX + bikes[i].c * CS + CS / 2, y: OY + bikes[i].r * CS + CS / 2 } : null,
+      dbg: () => ({ alive: bikes.map(b => b.alive), t }),
+      ai(i, dt) {
+        const b = bikes[i]; if (!b || !b.alive || over) return null;
+        const L = api.cpu, S = this.s || (this.s = []), st = S[i] || (S[i] = { bt: 0 });
+        const block = new Set(); bikes.forEach((o, k) => { if (k !== i && o.alive) for (const [dx, dy] of DIRS) block.add((o.r + dy) * COLS + o.c + dx); });
+        const opts = []; let nearest = null, nd = 1e9;
+        bikes.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.abs(o.c - b.c) + Math.abs(o.r - b.r); if (d < nd) { nd = d; nearest = o; } } });
+        for (const turn of [0, 1, 3]) {
+          const d = (b.d + turn) % 4, nc = b.c + DIRS[d][0], nr = b.r + DIRS[d][1]; if (!free(nc, nr)) continue;
+          let v = area(nc, nr, block) + (turn === 0 ? 4 : 0);
+          if (L > 0 && nearest) v -= (Math.abs(nearest.c - nc) + Math.abs(nearest.r - nr)) * [0, .35, .7][L];
+          if (block.has(nr * COLS + nc)) v -= 60;
+          /* two steps ahead: avoid dead-end slots */
+          let ahead = 0; for (const [dx, dy] of DIRS) if (free(nc + dx, nr + dy)) ahead++; if (ahead === 0) v -= 80;
+          opts.push([v + rand(0, [14, 5, 1.5][L]), d]);
+        }
+        let d = b.d;
+        if (opts.length) { opts.sort((x, y) => y[0] - x[0]); d = opts[0][1]; if (L === 0 && opts.length > 1 && rand() < .03) d = opts[1][1]; }
+        if (st.bt > 0) st.bt--; else if (L > 0 && b.boost > .55 && rand() < [0, .004, .01][L] && nd < 18) st.bt = irand(10, 26);
+        return { x: DIRS[d][0], y: DIRS[d][1], a: st.bt > 0 && b.boost > .05 };
+      },
+      reset() {
+        grid = new Int8Array(COLS * ROWS).fill(-1);
+        const S2 = [[8, 14, 0], [41, 13, 2]], S4 = [[6, 6, 0], [43, 21, 2], [43, 6, 1], [6, 21, 3]];
+        const st = n === 2 ? S2 : S4; bikes = [];
+        for (let i = 0; i < n; i++) { const [c, r, d] = st[i]; bikes.push({ c, r, d, nd: d, alive: true, boost: 1, bo: false, dead: 0 }); grid[r * COLS + c] = i; }
+        over = false; endT = 0; winner = -1; t = 0; gt = 0; tick = 0; msg = ''; parts = []; anim = 0;
+      },
+      update(dt) {
+        anim += dt; parts.forEach(p => { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; }); parts = parts.filter(p => p.t < .7);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        t += dt;
+        for (let i = 0; i < n; i++) {
+          const b = bikes[i]; if (!b.alive) { b.dead += dt; continue; }
+          const s = api.input(i);
+          if (Math.abs(s.x) > .5 || Math.abs(s.y) > .5) { const nd = Math.abs(s.x) >= Math.abs(s.y) ? (s.x > 0 ? 0 : 2) : (s.y > 0 ? 1 : 3); if ((nd + 2) % 4 !== b.d) b.nd = nd; }
+          b.bo = !!s.a && b.boost > .02 && t > 1.2;
+          if (!b.bo) b.boost = Math.min(1, b.boost + dt * .16);
+        }
+        if (t < 1.2) return;
+        const speedUp = clamp(1 - (t - 1.2) * .004, .62, 1);
+        gt += dt / speedUp;
+        while (gt >= G && !over) {
+          gt -= G; tick++;
+          const mv = []; /* bikes that step this tick */
+          for (let i = 0; i < n; i++) { const b = bikes[i]; if (!b.alive) continue; if (b.bo || tick % 2 === 0) { if (b.bo) b.boost = Math.max(0, b.boost - G * .9); mv.push(i); } }
+          const tg = {};
+          for (const i of mv) { const b = bikes[i]; if ((b.nd + 2) % 4 !== b.d) b.d = b.nd; tg[i] = [b.c + DIRS[b.d][0], b.r + DIRS[b.d][1]]; }
+          const dead = [];
+          for (const i of mv) {
+            const [c, r] = tg[i]; let die = !free(c, r);
+            for (const k of mv) if (k !== i && tg[k][0] === c && tg[k][1] === r) die = true;
+            if (die) dead.push(i);
+          }
+          for (const i of mv) if (!dead.includes(i)) { const b = bikes[i]; b.c = tg[i][0]; b.r = tg[i][1]; grid[b.r * COLS + b.c] = i; }
+          for (const i of dead) {
+            const b = bikes[i]; b.alive = false; b.dead = 0; api.beep('die');
+            const cx = OX + b.c * CS + CS / 2, cy = OY + b.r * CS + CS / 2;
+            for (let k = 0; k < 26; k++) { const a = rand(0, TAU), sp = rand(60, 320); parts.push({ x: cx, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t: 0, c: col(i) }); }
+          }
+          const live = bikes.map((b, i) => b.alive ? i : -1).filter(i => i >= 0);
+          if (live.length <= 1) { over = true; endT = 1.3; winner = live.length ? live[0] : -1; msg = live.length ? 'Last rider.' : 'Everyone crashed.'; }
+          else if (t > 180) { over = true; endT = 1.3; winner = -1; msg = 'Stalemate.'; }
+        }
+      },
+      draw(g) {
+        g.fillStyle = '#0B131B'; g.fillRect(OX - 8, OY - 8, COLS * CS + 16, ROWS * CS + 16);
+        g.fillStyle = '#0F1A24'; g.fillRect(OX, OY, COLS * CS, ROWS * CS);
+        g.fillStyle = 'rgba(255,255,255,.045)'; for (let r = 0; r < ROWS; r += 2) for (let c = 0; c < COLS; c += 2) g.fillRect(OX + c * CS + CS / 2 - 1, OY + r * CS + CS / 2 - 1, 2, 2);
+        for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { const v = grid[r * COLS + c]; if (v < 0) continue; g.fillStyle = col(v); g.globalAlpha = bikes[v] && bikes[v].alive ? .9 : .55; g.fillRect(OX + c * CS + 1, OY + r * CS + 1, CS - 2, CS - 2); }
+        g.globalAlpha = 1;
+        for (let i = 0; i < n; i++) {
+          const b = bikes[i]; if (!b.alive) continue; const x = OX + b.c * CS + CS / 2, y = OY + b.r * CS + CS / 2;
+          if (b.bo) D.disc(g, x, y, CS * 1.25, 'rgba(255,255,255,.18)');
+          D.disc(g, x, y, CS * .7, '#fff'); D.disc(g, x, y, CS * .46, col(i));
+        }
+        for (const p of parts) { g.globalAlpha = 1 - p.t / .7; D.disc(g, p.x, p.y, 4, p.c); } g.globalAlpha = 1;
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : msg) : 'Light Trails', W / 2, 30, 28, over && winner >= 0 ? col(winner) : SCR.fg);
+        for (let i = 0; i < n; i++) {
+          const x = 70 + i * (W - 140) / Math.max(1, n - 1), b = bikes[i];
+          D.text(g, api.players[i].name + (b.alive ? '' : ' (out)'), x, 52, 15, b.alive ? col(i) : SCR.dim);
+          g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(x - 40, 62, 80, 4); if (b.alive) { g.fillStyle = col(i); g.fillRect(x - 40, 62, 80 * b.boost, 4); }
+        }
+        if (t < 1.2 && !over) D.text(g, 'Ready', W / 2, H / 2, 60, '#fff');
+      }
+    };
+  }
+});
+
+/* ---------- Skyfall ---------- */
+registerGame({
+  id: 'skyfall', cpu: true, title: 'Skyfall', blurb: 'Meteors rain on the arena. Read the red rings, dodge and outlast everyone.',
+  kind: 'live', min: 2, max: 4, color: 0,
+  help: 'Move with the stick or keys. A red ring shows where a meteor will land and when: get out of it before it fills. Press A to dash; a dash cannot be hurt, but it has a cooldown. The meteors come faster and bigger the longer it goes on, and some rain in lines. Last one standing wins.',
+  touch: 'Your character chases your finger or mouse. Press for a dash.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="6" stroke-linecap="round"><circle cx="120" cy="86" r="20"/><circle cx="120" cy="86" r="8" fill="#0F1923"/><path d="M52 14l30 38M30 28l28 34M80 6l24 30" /><circle cx="86" cy="58" r="10" fill="#0F1923"/></svg>`; },
+  create(api) {
+    const n = api.n, col = i => api.players[i].color, PR = 17, AX0 = 40, AX1 = W - 40, AY0 = 74, AY1 = H - 30;
+    let ps, mets, booms, over, endT, winner, t, spawnT, lineT, msg, anim, order;
+    const warnFor = () => Math.max(.62, 1.05 - t * .0045);
+    function spawn(x, y, r) { mets.push({ x: clamp(x, AX0 + 20, AX1 - 20), y: clamp(y, AY0 + 20, AY1 - 20), r, T: warnFor(), w: 0 }); }
+    return {
+      dragAxes: 'xy', drag: i => ps[i] && ps[i].alive ? ps[i] : null,
+      dbg: () => ({ t, alive: ps.map(p => p.alive), mets: mets.length }),
+      ai(i, dt) {
+        const p = ps[i]; if (!p || !p.alive || over) return null;
+        const L = api.cpu, S = this.s || (this.s = []), st = S[i] || (S[i] = { h: 0, dx: 0, dy: 0 });
+        st.h -= dt; let dash = false;
+        const danger = (x, y, tt) => { let d = 0; for (const m of mets) { const rem = m.T - m.w; if (rem > tt + .55 || rem < tt - .5 && rem < 0) continue; const dist = Math.hypot(x - m.x, y - m.y); if (dist < m.r + PR + 8) d += 100 + (m.r + PR + 8 - dist); } return d; };
+        if (st.h <= 0) {
+          st.h = [.3, .16, .07][L]; let best = 1e9, bx = 0, by = 0;
+          for (let k = 0; k < 9; k++) {
+            const a = k === 8 ? 0 : k * TAU / 8, sp = k === 8 ? 0 : 1, dx = Math.cos(a) * sp, dy = Math.sin(a) * sp;
+            let v = 0; for (const tt of [.2, .45, .75]) v += danger(p.x + dx * 250 * tt, p.y + dy * 250 * tt, tt);
+            const fx = p.x + dx * 110, fy = p.y + dy * 110; if (fx < AX0 + 20 || fx > AX1 - 20 || fy < AY0 + 20 || fy > AY1 - 20) v += 30;
+            v += Math.hypot(fx - W / 2, fy - (AY0 + AY1) / 2) * .02 + (k === 8 ? .5 : 0) + rand(0, [6, 2, .4][L]);
+            if (v < best) { best = v; bx = dx; by = dy; }
+          }
+          st.dx = bx; st.dy = by;
+        }
+        if (p.cd <= 0 && danger(p.x, p.y, .12) > 0 && rand() < [.3, .6, .95][L]) dash = true;
+        return { x: st.dx, y: st.dy, a: dash };
+      },
+      reset() {
+        ps = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; ps.push({ x: W / 2 + Math.cos(a) * 190, y: (AY0 + AY1) / 2 + Math.sin(a) * 130, vx: 0, vy: 0, cd: 0, dsh: 0, dx: 1, dy: 0, alive: true, fall: 0, died: 0 }); }
+        mets = []; booms = []; over = false; endT = 0; winner = -1; t = 0; spawnT = 1.4; lineT = 12; msg = ''; anim = 0; order = [];
+      },
+      update(dt) {
+        anim += dt; booms.forEach(b => b.t += dt); booms = booms.filter(b => b.t < .55);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        t += dt;
+        for (let i = 0; i < n; i++) {
+          const p = ps[i]; if (!p.alive) { p.fall += dt; continue; }
+          const s = api.input(i); p.cd -= dt; p.dsh -= dt;
+          const m = Math.hypot(s.x, s.y); if (m > .2) { p.dx = s.x / m; p.dy = s.y / m; }
+          if (s.pa && p.cd <= 0) { p.dsh = .2; p.cd = 1.1; api.beep('dash'); }
+          const sp = p.dsh > 0 ? 720 : 255; const mx = p.dsh > 0 ? p.dx : s.x, my = p.dsh > 0 ? p.dy : s.y;
+          p.x = clamp(p.x + mx * sp * dt, AX0 + PR, AX1 - PR); p.y = clamp(p.y + my * sp * dt, AY0 + PR, AY1 - PR); p.moving = m > .2 || p.dsh > 0;
+        }
+        spawnT -= dt; lineT -= dt;
+        if (spawnT <= 0) {
+          spawnT = Math.max(.1, .95 - t * .013);
+          const live = ps.filter(p => p.alive); const r = 50 + Math.min(34, t * .6) + rand(0, 20);
+          if (rand() < (t > 70 ? .92 : .55) && live.length) { const p = live[irand(0, live.length - 1)]; spawn(p.x + p.vx * .3 + rand(-30, 30), p.y + rand(-30, 30), r); } else spawn(rand(AX0, AX1), rand(AY0, AY1), r);
+        }
+        if (lineT <= 0) {
+          lineT = Math.max(8, 15 - t * .05); const hz = rand() < .5, k = irand(8, 11), at = hz ? rand(AY0 + 60, AY1 - 60) : rand(AX0 + 80, AX1 - 80), dir = rand() < .5 ? 1 : -1;
+          for (let j = 0; j < k; j++) { const m = { x: hz ? (dir > 0 ? AX0 + 30 + j * (AX1 - AX0 - 60) / (k - 1) : AX1 - 30 - j * (AX1 - AX0 - 60) / (k - 1)) : at, y: hz ? at : (dir > 0 ? AY0 + 30 + j * (AY1 - AY0 - 60) / (k - 1) : AY1 - 30 - j * (AY1 - AY0 - 60) / (k - 1)), r: 46, T: warnFor() + j * .09, w: 0 }; mets.push(m); }
+        }
+        for (const m of mets) m.w += dt;
+        const land = mets.filter(m => m.w >= m.T); mets = mets.filter(m => m.w < m.T);
+        for (const m of land) {
+          booms.push({ x: m.x, y: m.y, r: m.r, t: 0 }); api.beep('hit');
+          for (let i = 0; i < n; i++) { const p = ps[i]; if (p.alive && p.dsh <= 0 && Math.hypot(p.x - m.x, p.y - m.y) < m.r + PR * .55) { p.alive = false; p.fall = 0; order.push(i); api.beep('die'); } }
+        }
+        const live = ps.map((p, i) => p.alive ? i : -1).filter(i => i >= 0);
+        if (live.length <= 1) { over = true; endT = 1.4; winner = live.length ? live[0] : -1; msg = live.length ? 'Last one standing.' : 'Flattened together.'; }
+      },
+      draw(g) {
+        g.fillStyle = '#1A2530'; g.fillRect(0, 0, W, H);
+        g.fillStyle = '#243645'; D.rr(g, AX0 - 12, AY0 - 12, AX1 - AX0 + 24, AY1 - AY0 + 24, 26); g.fill();
+        g.fillStyle = '#2E4659'; D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 18); g.fill();
+        g.fillStyle = 'rgba(255,255,255,.04)'; for (let x = AX0 + 40; x < AX1; x += 80) g.fillRect(x, AY0, 2, AY1 - AY0);
+        for (const b of booms) { const f = b.t / .55; g.globalAlpha = 1 - f; D.disc(g, b.x, b.y, b.r * (.8 + f * .5), '#FFB020'); D.disc(g, b.x, b.y, b.r * (.5 + f * .4), '#FFF3B0'); g.globalAlpha = 1; }
+        for (const m of mets) {
+          const f = clamp(m.w / m.T, 0, 1); g.globalAlpha = .25 + .15 * Math.sin(anim * 18); D.disc(g, m.x, m.y, m.r, '#FF3B2F'); g.globalAlpha = .55; D.disc(g, m.x, m.y, m.r * f, '#FF3B2F'); g.globalAlpha = 1;
+          D.disc(g, m.x, m.y - (1 - f) * 260, 10 + 6 * f, '#FFB020'); D.disc(g, m.x, m.y - (1 - f) * 260, 6 + 3 * f, '#FFF3B0');
+        }
+        for (let i = 0; i < n; i++) {
+          const p = ps[i]; if (!p.alive) { if (p.fall < .6) { g.globalAlpha = 1 - p.fall / .6; puppet(g, api, i, p.x, p.y, .4, 'ouch', 1, true); g.globalAlpha = 1; } continue; }
+          if (p.dsh > 0) D.disc(g, p.x, p.y - 12, 26, 'rgba(255,255,255,.28)');
+          puppet(g, api, i, p.x, p.y + 14, .42, over && winner === i ? 'cheer' : p.moving ? 'run' : 'idle', p.dx < -.2 ? -1 : 1, true);
+          if (p.cd > 0) { g.fillStyle = 'rgba(0,0,0,.4)'; g.fillRect(p.x - 14, p.y + 22, 28, 4); g.fillStyle = col(i); g.fillRect(p.x - 14, p.y + 22, 28 * (1 - clamp(p.cd / 1.1, 0, 1)), 4); }
+        }
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : msg) : 'Skyfall  ' + Math.floor(t) + 's', W / 2, 34, 28, over && winner >= 0 ? col(winner) : SCR.fg);
+        for (let i = 0; i < n; i++) D.text(g, api.players[i].name + (ps[i].alive ? '' : ' (out)'), 100 + i * (W - 200) / Math.max(1, n - 1), 52, 15, ps[i].alive ? col(i) : SCR.dim);
+      }
+    };
+  }
+});
+
+/* ---------- Hot Bomb ---------- */
+registerGame({
+  id: 'hotbomb', cpu: true, title: 'Hot Bomb', blurb: 'Pass the ticking bomb by touching someone. Whoever holds it at zero is out.',
+  kind: 'live', min: 2, max: 4, color: 1,
+  help: 'One player carries a lit bomb. Touch another player to pass it on (the new holder is safe from a tag-back for a moment). When the fuse runs out the holder is blown up and a new bomb starts with a shorter fuse. Press A to dash. Pillars block the way. Last one alive wins.',
+  touch: 'Your character chases your finger or mouse. Press for a dash.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="6" stroke-linecap="round"><circle cx="96" cy="74" r="34" fill="#0F1923"/><path d="M118 44l16-18 16 4"/><path d="M158 18l6-8M170 30l10-2M152 8v-8" stroke-width="5"/></svg>`; },
+  create(api) {
+    const n = api.n, col = i => api.players[i].color, PR = 18, AX0 = 50, AX1 = W - 50, AY0 = 78, AY1 = H - 34, PIL = [[W / 2, 330, 46], [W / 2 - 250, 230, 38], [W / 2 + 250, 430, 38]];
+    let ps, holder, fuse, fuse0, round, imm, over, endT, winner, t, frz, msg, parts, anim, tickT;
+    function pickHolder() { const live = ps.map((p, i) => p.alive ? i : -1).filter(i => i >= 0); holder = live[irand(0, live.length - 1)]; fuse0 = Math.max(5, 11 - round * .9) + rand(0, 3); fuse = fuse0; imm = 1; frz = 1.0; }
+    return {
+      dragAxes: 'xy', drag: i => ps[i] && ps[i].alive ? ps[i] : null,
+      dbg: () => ({ holder, fuse, alive: ps.map(p => p.alive), round }),
+      ai(i, dt) {
+        const p = ps[i]; if (!p || !p.alive || over) return null;
+        const L = api.cpu; let dx = 0, dy = 0, dash = false;
+        const wall = () => { const cx = W / 2, cy = (AY0 + AY1) / 2, ex = (p.x < AX0 + 70 ? 1 : p.x > AX1 - 70 ? -1 : 0), ey = (p.y < AY0 + 70 ? 1 : p.y > AY1 - 70 ? -1 : 0); return [ex, ey]; };
+        if (holder === i) {
+          let tg = null, bd = 1e9; ps.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.hypot(o.x - p.x, o.y - p.y) - (k === lastFrom ? 120 : 0); if (d < bd) { bd = d; tg = o; } } });
+          if (tg) { dx = tg.x + tg.vx * .2 - p.x; dy = tg.y + tg.vy * .2 - p.y; const m = Math.hypot(dx, dy) || 1; dx /= m; dy /= m; if (m < 120 && p.cd <= 0 && rand() < [.03, .08, .2][L]) dash = true; }
+        } else {
+          const h = ps[holder]; let ax = p.x - h.x, ay = p.y - h.y; const d = Math.hypot(ax, ay) || 1; ax /= d; ay /= d;
+          const w = wall(); const cx = (W / 2 - p.x), cy = ((AY0 + AY1) / 2 - p.y), cm = Math.hypot(cx, cy) || 1;
+          const near = d < 260 ? 1 : .3; dx = ax * near + w[0] * 1.6 + cx / cm * (d < 160 ? .35 : .1) + (-ay) * .5 * (this.sgn || 1); dy = ay * near + w[1] * 1.6 + cy / cm * (d < 160 ? .35 : .1) + ax * .5 * (this.sgn || 1);
+          for (const [px, py, pr] of PIL) { const qx = p.x - px, qy = p.y - py, qd = Math.hypot(qx, qy); if (qd < pr + 64) { dx += qx / qd * 1.4 + (-qy / qd) * .8; dy += qy / qd * 1.4 + (qx / qd) * .8; } }
+          const m = Math.hypot(dx, dy) || 1; dx /= m; dy /= m;
+          if (d < 90 && p.cd <= 0 && rand() < [.05, .15, .4][L]) dash = true;
+          if (imm > 0 && holder !== i) { /* just handed over: keep clear */ }
+        }
+        const j = [.5, .2, 0][L]; return { x: dx + rand(-j, j), y: dy + rand(-j, j), a: dash };
+      },
+      reset() {
+        ps = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; ps.push({ x: W / 2 + Math.cos(a) * 270, y: (AY0 + AY1) / 2 + Math.sin(a) * 160, vx: 0, vy: 0, cd: 0, dsh: 0, dx: 1, dy: 0, alive: true, fall: 0, moving: false }); }
+        over = false; endT = 0; winner = -1; t = 0; round = 0; msg = ''; parts = []; anim = 0; tickT = 0; lastFrom = -1; pickHolder();
+      },
+      update(dt) {
+        anim += dt; parts.forEach(q => { q.t += dt; q.x += q.vx * dt; q.y += q.vy * dt; }); parts = parts.filter(q => q.t < .8);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        t += dt; imm -= dt;
+        for (let i = 0; i < n; i++) {
+          const p = ps[i]; if (!p.alive) { p.fall += dt; continue; }
+          const s = api.input(i); p.cd -= dt; p.dsh -= dt; const ox = p.x, oy = p.y;
+          const m = Math.hypot(s.x, s.y); if (m > .2) { p.dx = s.x / m; p.dy = s.y / m; }
+          if (s.pa && p.cd <= 0 && frz <= 0) { p.dsh = .18; p.cd = 1.2; api.beep('dash'); }
+          const sp = p.dsh > 0 ? 700 : (holder === i ? 272 : 250), mx = p.dsh > 0 ? p.dx : s.x, my = p.dsh > 0 ? p.dy : s.y;
+          if (frz <= 0) { p.x += mx * sp * dt; p.y += my * sp * dt; }
+          p.x = clamp(p.x, AX0 + PR, AX1 - PR); p.y = clamp(p.y, AY0 + PR, AY1 - PR);
+          for (const [px, py, pr] of PIL) { const qx = p.x - px, qy = p.y - py, qd = Math.hypot(qx, qy); if (qd < pr + PR) { p.x = px + qx / qd * (pr + PR); p.y = py + qy / qd * (pr + PR); } }
+          p.vx = (p.x - ox) / dt; p.vy = (p.y - oy) / dt; p.moving = m > .2 || p.dsh > 0;
+        }
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (ps[i].alive && ps[j].alive) bumpBalls(ps[i], ps[j], PR * .8, .3);
+        if (frz > 0) { frz -= dt; return; }
+        const h = ps[holder];
+        if (imm <= 0) for (let k = 0; k < n; k++) if (k !== holder && ps[k].alive && Math.hypot(ps[k].x - h.x, ps[k].y - h.y) < PR * 2 + 2) { lastFrom = holder; holder = k; imm = 1.0; api.beep('hit'); for (let q = 0; q < 10; q++) { const a = rand(0, TAU); parts.push({ x: ps[k].x, y: ps[k].y - 20, vx: Math.cos(a) * 160, vy: Math.sin(a) * 160, t: 0, c: '#FFC933' }); } break; }
+        fuse -= dt; tickT -= dt; const rate = clamp(fuse / fuse0, .08, 1) * 1.0 + .12; if (tickT <= 0) { tickT = rate * .6; api.beep('select'); }
+        if (fuse <= 0) {
+          const p = ps[holder]; p.alive = false; p.fall = 0; api.beep('die'); api.beep('hit');
+          for (let q = 0; q < 40; q++) { const a = rand(0, TAU), sp = rand(80, 420); parts.push({ x: p.x, y: p.y - 20, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t: 0, c: q % 2 ? '#FFB020' : '#FF4A3D' }); }
+          const live = ps.map((o, i) => o.alive ? i : -1).filter(i => i >= 0);
+          if (live.length <= 1) { over = true; endT = 1.4; winner = live.length ? live[0] : -1; msg = 'Last one alive.'; }
+          else { round++; lastFrom = -1; pickHolder(); }
+        }
+      },
+      draw(g) {
+        g.fillStyle = '#1B2A38'; g.fillRect(0, 0, W, H);
+        g.fillStyle = '#2B3F52'; D.rr(g, AX0 - 14, AY0 - 14, AX1 - AX0 + 28, AY1 - AY0 + 28, 28); g.fill();
+        g.fillStyle = '#35506A'; D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 20); g.fill();
+        for (const [px, py, pr] of PIL) { D.disc(g, px + 4, py + 7, pr, 'rgba(0,0,0,.3)'); D.disc(g, px, py, pr, '#10202E'); D.disc(g, px, py, pr - 8, '#1C3347'); }
+        for (let i = 0; i < n; i++) {
+          const p = ps[i]; if (!p.alive) { if (p.fall < .5) { g.globalAlpha = 1 - p.fall / .5; puppet(g, api, i, p.x, p.y + 12, .42, 'ouch', 1, false); g.globalAlpha = 1; } continue; }
+          if (p.dsh > 0) D.disc(g, p.x, p.y - 12, 26, 'rgba(255,255,255,.25)');
+          puppet(g, api, i, p.x, p.y + 14, .42, over && winner === i ? 'cheer' : p.moving ? 'run' : 'idle', p.dx < -.2 ? -1 : 1, true);
+          if (holder === i && !over) {
+            const pul = 1 + .12 * Math.sin(anim * (8 + 22 * (1 - clamp(fuse / fuse0, 0, 1)))), f = clamp(fuse / fuse0, 0, 1);
+            D.disc(g, p.x, p.y - 62, 16 * pul, f < .3 ? '#FF4A3D' : '#10161C'); D.disc(g, p.x - 5, p.y - 67, 4, 'rgba(255,255,255,.4)');
+            g.fillStyle = '#FFC933'; g.fillRect(p.x + 4, p.y - 82, 4, 8); D.disc(g, p.x + 6, p.y - 86 - Math.sin(anim * 30) * 2, 4 + (anim * 20 % 3), '#FFB020');
+            g.fillStyle = 'rgba(0,0,0,.45)'; g.fillRect(p.x - 22, p.y + 24, 44, 6); g.fillStyle = f < .3 ? '#FF4A3D' : '#FFC933'; g.fillRect(p.x - 22, p.y + 24, 44 * f, 6);
+          }
+        }
+        for (const q of parts) { g.globalAlpha = 1 - q.t / .8; D.disc(g, q.x, q.y, 5, q.c); } g.globalAlpha = 1;
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : msg) : 'Hot Bomb  round ' + (round + 1), W / 2, 34, 28, over && winner >= 0 ? col(winner) : SCR.fg);
+        for (let i = 0; i < n; i++) D.text(g, api.players[i].name + (ps[i].alive ? '' : ' (out)'), 100 + i * (W - 200) / Math.max(1, n - 1), 56, 15, ps[i].alive ? col(i) : SCR.dim);
+      }
+    };
+    var lastFrom;
+  }
+});
+/* =====================================================================
+   MORE ARCADE: Hill Rush, Seed Chase, Echo Pads
+   ===================================================================== */
+
+/* ---------- Hill Rush ---------- */
+registerGame({
+  id: 'hill', cpu: true, title: 'Hill Rush', blurb: 'Hold the glowing hill alone to score. Shove rivals off it. The hill keeps moving.',
+  kind: 'live', min: 2, max: 4, color: 2,
+  help: 'Stand on the hill by yourself to score two points a second. If several players are on it, only the one closest to the middle scores, at half speed. Press A to shove everyone close to you away, with a short cooldown. Bodies bump, so you can block too. The hill jumps to a new spot every ten seconds. First to 50 points, or the highest score after 90 seconds, wins.',
+  touch: 'Your player chases your finger or mouse. Press for a shove.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="6" stroke-linecap="round"><ellipse cx="100" cy="88" rx="62" ry="22"/><circle cx="100" cy="52" r="16" fill="#0F1923"/><path d="M52 40l-14-12M148 40l14-12M100 14v10"/></svg>`; },
+  create(api) {
+    const n = api.n, col = i => api.players[i].color, PR = 20, AX0 = 50, AX1 = W - 50, AY0 = 84, AY1 = H - 36, HR = 92, GOAL = 50, TIME = 90;
+    let ps, hill, nextHill, hillT, slide, sc, over, endT, winner, t, msg, anim, rings, acc;
+    function newSpot() { return { x: rand(AX0 + HR + 20, AX1 - HR - 20), y: rand(AY0 + HR + 10, AY1 - HR - 10) }; }
+    return {
+      dragAxes: 'xy', drag: i => ps[i],
+      dbg: () => ({ sc, t, hill }),
+      ai(i, dt) {
+        const p = ps[i]; if (!p || over) return null; const L = api.cpu;
+        const S = this.s || (this.s = []), st = S[i] || (S[i] = { h: 0 });
+        let tx = hill.x, ty = hill.y, a = false;
+        const inHill = ps.map(q => Math.hypot(q.x - hill.x, q.y - hill.y) < HR);
+        const foes = ps.map((q, k) => k).filter(k => k !== i && inHill[k]);
+        const near = ps.map((q, k) => k).filter(k => k !== i && Math.hypot(ps[k].x - p.x, ps[k].y - p.y) < 92);
+        if (foes.length && !inHill[i] || (foes.length && inHill[i])) {
+          const q = ps[foes[0]], d = Math.hypot(q.x - hill.x, q.y - hill.y) || 1;
+          tx = q.x - (q.x - hill.x) / d * 44; ty = q.y - (q.y - hill.y) / d * 44;
+        }
+        if (near.length && p.cd <= 0 && (inHill[i] ? near.some(k => inHill[k] || true) : near.some(k => inHill[k])) && rand() < [.05, .12, .3][L]) a = true;
+        const dx = tx - p.x, dy = ty - p.y, m = Math.hypot(dx, dy);
+        const j = [.4, .15, 0][L]; return { x: m < 12 ? 0 : dx / m + rand(-j, j), y: m < 12 ? 0 : dy / m + rand(-j, j), a };
+      },
+      reset() {
+        ps = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; ps.push({ x: W / 2 + Math.cos(a) * 260, y: (AY0 + AY1) / 2 + Math.sin(a) * 150, vx: 0, vy: 0, cd: 0, st: 0 }); }
+        hill = { x: W / 2, y: (AY0 + AY1) / 2 }; nextHill = null; hillT = 10; slide = 0; sc = Array(n).fill(0); acc = Array(n).fill(0); over = false; endT = 0; winner = -1; t = 0; msg = ''; anim = 0; rings = [];
+      },
+      update(dt) {
+        anim += dt; rings.forEach(r => r.t += dt); rings = rings.filter(r => r.t < .35);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        t += dt;
+        for (let i = 0; i < n; i++) {
+          const p = ps[i], s = api.input(i); p.cd -= dt; p.st -= dt;
+          const f = Math.exp(-5 * dt); p.vx *= f; p.vy *= f;
+          if (p.st <= 0) { p.vx += s.x * 2600 * dt; p.vy += s.y * 2600 * dt; }
+          const sp = Math.hypot(p.vx, p.vy), cap = 300; if (sp > cap && p.st <= 0) { p.vx *= cap / sp; p.vy *= cap / sp; }
+          if (s.pa && p.cd <= 0) {
+            p.cd = 1.5; api.beep('hit'); rings.push({ x: p.x, y: p.y, t: 0, c: col(i) });
+            for (let k = 0; k < n; k++) if (k !== i) { const q = ps[k], dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy); if (d < 96 && d > .1) { q.vx += dx / d * 760; q.vy += dy / d * 760; q.st = .22; } }
+          }
+        }
+        for (const p of ps) { p.x += p.vx * dt; p.y += p.vy * dt; if (p.x < AX0 + PR) { p.x = AX0 + PR; p.vx = Math.abs(p.vx) * .6; } if (p.x > AX1 - PR) { p.x = AX1 - PR; p.vx = -Math.abs(p.vx) * .6; } if (p.y < AY0 + PR) { p.y = AY0 + PR; p.vy = Math.abs(p.vy) * .6; } if (p.y > AY1 - PR) { p.y = AY1 - PR; p.vy = -Math.abs(p.vy) * .6; } }
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) bumpBalls(ps[i], ps[j], PR, .9);
+        hillT -= dt;
+        if (hillT <= 0 && !nextHill) { nextHill = newSpot(); slide = 0; msg = ''; }
+        if (nextHill) { slide += dt / 1.1; hill = { x: hill.x + (nextHill.x - hill.x) * Math.min(1, dt * 3.2), y: hill.y + (nextHill.y - hill.y) * Math.min(1, dt * 3.2) }; if (slide >= 1) { hill = nextHill; nextHill = null; hillT = 10; } }
+        else {
+          let on = []; for (let i = 0; i < n; i++) if (Math.hypot(ps[i].x - hill.x, ps[i].y - hill.y) < HR + 4) on.push(i);
+          if (on.length >= 1) { let w = on[0]; for (const k of on) if (Math.hypot(ps[k].x - hill.x, ps[k].y - hill.y) < Math.hypot(ps[w].x - hill.x, ps[w].y - hill.y)) w = k; on = [w, on.length === 1 ? 2 : 1]; acc[w] += dt * (on[1] === 2 ? 2 : 1); if (acc[w] >= 1) { acc[w] -= 1; sc[w]++; if (sc[w] % 5 === 0) api.beep('place'); } }
+        }
+        const top = Math.max(...sc);
+        if (top >= GOAL) { over = true; endT = 1.3; const w = sc.map((v, i) => v === top ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; msg = 'Hill taken.'; }
+        else if (t >= TIME) { over = true; endT = 1.3; const w = sc.map((v, i) => v === top ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; msg = 'Time.'; }
+      },
+      draw(g) {
+        g.fillStyle = '#1B2A38'; g.fillRect(0, 0, W, H);
+        g.fillStyle = '#2B3F52'; D.rr(g, AX0 - 14, AY0 - 14, AX1 - AX0 + 28, AY1 - AY0 + 28, 28); g.fill();
+        g.fillStyle = '#35506A'; D.rr(g, AX0, AY0, AX1 - AX0, AY1 - AY0, 20); g.fill();
+        if (nextHill) { g.globalAlpha = .35; D.disc(g, nextHill.x, nextHill.y, HR, '#FFC933'); g.globalAlpha = 1; }
+        const on = []; for (let i = 0; i < n; i++) if (Math.hypot(ps[i].x - hill.x, ps[i].y - hill.y) < HR + 4) on.push(i);
+        const hc = nextHill ? '#7C91A5' : on.length === 1 ? col(on[0]) : on.length > 1 ? '#FF4A3D' : '#FFC933';
+        g.globalAlpha = .3 + .08 * Math.sin(anim * 5); D.disc(g, hill.x, hill.y, HR + 8, hc); g.globalAlpha = .55; D.disc(g, hill.x, hill.y, HR, hc); g.globalAlpha = 1; D.disc(g, hill.x, hill.y, HR * .55, 'rgba(255,255,255,.18)');
+        for (const r of rings) { g.globalAlpha = 1 - r.t / .35; D.disc(g, r.x, r.y, 20 + r.t / .35 * 80, r.c); g.globalAlpha = 1; D.disc(g, r.x, r.y, 14 + r.t / .35 * 76, '#35506A'); }
+        for (let i = 0; i < n; i++) { const p = ps[i]; puppet(g, api, i, p.x, p.y + 14, .42, over && winner === i ? 'cheer' : Math.hypot(p.vx, p.vy) > 40 ? 'run' : 'idle', p.vx < -20 ? -1 : 1, true); if (p.cd > 0) { g.fillStyle = 'rgba(0,0,0,.4)'; g.fillRect(p.x - 14, p.y + 22, 28, 4); g.fillStyle = col(i); g.fillRect(p.x - 14, p.y + 22, 28 * (1 - clamp(p.cd / 1.5, 0, 1)), 4); } }
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Draw') : 'Hill Rush  ' + Math.max(0, Math.ceil(TIME - t)) + 's', W / 2, 30, 28, over && winner >= 0 ? col(winner) : SCR.fg);
+        for (let i = 0; i < n; i++) { const x = 110 + i * (W - 220) / Math.max(1, n - 1); D.text(g, api.players[i].name + '  ' + sc[i], x, 58, 17, col(i)); g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(x - 50, 70, 100, 5); g.fillStyle = col(i); g.fillRect(x - 50, 70, 100 * clamp(sc[i] / GOAL, 0, 1), 5); }
+      }
+    };
+  }
+});
+
+/* ---------- Seed Chase ---------- */
+registerGame({
+  id: 'seedchase', cpu: true, title: 'Seed Chase', blurb: 'Race through a hedge maze eating seeds while dark hawks hunt you. Grab a golden seed to bite back.',
+  kind: 'live', min: 2, max: 4, color: 1,
+  help: 'Steer through the maze with the stick or keys, or point where you want to go. Eat seeds for a point each. Hawks chase you: a catch costs you points and sends you back to your corner. A golden seed makes you powerful for six seconds: send hawks home for a bonus, and steal points from rivals you touch. The round ends when the seeds run out or after two minutes. Most points wins.',
+  touch: 'Point where you want to go and your bird follows the maze toward your finger or mouse.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20h160v85H20z"/><path d="M20 52h70M130 20v50M60 85h90"/><circle cx="46" cy="36" r="7" fill="#0F1923"/><circle cx="110" cy="70" r="5" fill="#0F1923"/><circle cx="160" cy="88" r="5" fill="#0F1923"/></svg>`; },
+  create(api) {
+    const n = api.n, col = i => api.players[i].color, C = 31, R = 19, CS = 28, OX = 46, OY = 56, DX = [1, 0, -1, 0], DY = [0, 1, 0, -1], TIME = 120;
+    let wall, seeds, left, ps, hawks, over, endT, winner, t, msg, anim, pops;
+    const open = (c, r, d) => { const nc = c + DX[d], nr = r + DY[d]; return nc >= 0 && nr >= 0 && nc < C && nr < R && !wall[nr][nc]; };
+    function maze() {
+      wall = Array.from({ length: R }, () => Array(C).fill(true)); const vis = Array.from({ length: R }, () => Array(C).fill(false)); const st = [[1, 1]]; vis[1][1] = true; wall[1][1] = false;
+      while (st.length) {
+        const [c, r] = st[st.length - 1], nb = []; for (let d = 0; d < 4; d++) { const nc = c + DX[d] * 2, nr = r + DY[d] * 2; if (nc > 0 && nr > 0 && nc < C - 1 && nr < R - 1 && !vis[nr][nc]) nb.push(d); }
+        if (!nb.length) { st.pop(); continue; }
+        const d = nb[irand(0, nb.length - 1)], nc = c + DX[d] * 2, nr = r + DY[d] * 2; wall[r + DY[d]][c + DX[d]] = false; wall[nr][nc] = false; vis[nr][nc] = true; st.push([nc, nr]);
+      }
+      for (let k = 0; k < 46; k++) { const c = irand(1, C - 2), r = irand(1, R - 2); if (!wall[r][c]) continue; const h = (c % 2 === 0 && r % 2 === 1 && !wall[r][c - 1] && !wall[r][c + 1]), v = (c % 2 === 1 && r % 2 === 0 && !wall[r - 1][c] && !wall[r + 1][c]); if (h || v) wall[r][c] = false; }
+    }
+    function bfs(c0, r0, goal, avoid) {
+      /* first direction of the shortest path to a goal cell, or -1 */
+      const prev = new Int16Array(C * R).fill(-2), q = [c0 + r0 * C]; prev[q[0]] = -1; let k = 0;
+      while (k < q.length) {
+        const v = q[k++], c = v % C, r = (v / C) | 0; if (goal(c, r) && v !== q[0]) { let u = v, first = v; while (prev[u] !== -1) { first = u; u = prev[u]; } const fc = first % C, fr = (first / C) | 0; for (let d = 0; d < 4; d++) if (c0 + DX[d] === fc && r0 + DY[d] === fr) return d; return -1; }
+        for (let d = 0; d < 4; d++) { if (!open(c, r, d)) continue; const nc = c + DX[d], nr = r + DY[d], id = nc + nr * C; if (prev[id] !== -2) continue; if (avoid && avoid(nc, nr)) continue; prev[id] = v; q.push(id); }
+      }
+      return -1;
+    }
+    function step(e, speed, dt, pick) {
+      let rem = speed * dt, guard = 0;
+      while (rem > 1e-6 && guard++ < 6) {
+        if (e.moving) {
+          const s = Math.min(rem, e.togo); e.x += DX[e.dir] * s; e.y += DY[e.dir] * s; e.togo -= s; rem -= s;
+          if (e.togo <= 1e-6) { e.c += DX[e.dir]; e.r += DY[e.dir]; e.x = e.c; e.y = e.r; e.moving = false; }
+        } else {
+          const d = pick(e); if (d < 0 || !open(e.c, e.r, d)) { e.dir = d >= 0 ? d : e.dir; break; } e.dir = d; e.moving = true; e.togo = 1;
+        }
+      }
+    }
+    const pxx = e => OX + e.x * CS + CS / 2, pyy = e => OY + e.y * CS + CS / 2;
+    const starts = [[1, 1], [C - 2, R - 2], [C - 2, 1], [1, R - 2]];
+    function respawn(p, i) { p.c = starts[i][0]; p.r = starts[i][1]; p.x = p.c; p.y = p.r; p.moving = false; p.dir = 0; p.want = -1; p.out = 1.4; p.pw = 0; p.inv = 3; }
+    return {
+      dragAxes: 'xy', drag: i => ps[i] && ps[i].out <= 0 ? { x: pxx(ps[i]), y: pyy(ps[i]) } : null,
+      dbg: () => ({ left, sc: ps.map(p => p.sc), t, p: ps.map(p => [p.c, p.r, p.dir, p.moving, p.want, +p.out.toFixed(1)]), h: hawks.map(h => [h.c, h.r, h.sleep > 0]) }),
+      ai(i, dt) {
+        const p = ps[i]; if (!p || over || p.out > 0) return null; const L = api.cpu;
+        /* decide for the next junction: when already moving, plan from the cell we are heading to and never reverse mid-corridor */
+        const oc = p.moving ? p.c + DX[p.dir] : p.c, orr = p.moving ? p.r + DY[p.dir] : p.r, back = p.moving ? (p.dir + 2) % 4 : -1;
+        const opens = []; for (let k = 0; k < 4; k++) if (k !== back && oc + DX[k] >= 0 && orr + DY[k] >= 0 && oc + DX[k] < C && orr + DY[k] < R && !wall[orr + DY[k]][oc + DX[k]]) opens.push(k);
+        if (!opens.length) return { x: 0, y: 0 };
+        const hz = hawks.filter(h => h.sleep <= 0), hd = h => Math.abs(h.c - oc) + Math.abs(h.r - orr);
+        const danger = hz.filter(h => p.pw <= 0 && hd(h) <= [3, 5, 7][L]); let d = -1;
+        if (danger.length) {
+          let best = -1e9; for (const k of opens) { const nc = oc + DX[k], nr = orr + DY[k]; let v = 0; for (const h of danger) v += Math.abs(h.c - nc) + Math.abs(h.r - nr); v += rand(0, 1.2); if (v > best) { best = v; d = k; } }
+        } else if (p.pw > 1.5 && hz.length) { d = bfs(oc, orr, (c, r) => hz.some(h => h.c === c && h.r === r)); }
+        if (d < 0 || !opens.includes(d)) {
+          const pwn = hz.length > 1 && rand() < [.2, .5, .8][L] ? bfs(oc, orr, (c, r) => seeds[r][c] === 2) : -1;
+          d = pwn >= 0 ? pwn : bfs(oc, orr, (c, r) => seeds[r][c] > 0);
+          if (L === 0 && rand() < .08) d = opens[irand(0, opens.length - 1)];
+        }
+        if (!opens.includes(d)) d = (p.moving && opens.includes(p.dir)) ? p.dir : opens[irand(0, opens.length - 1)];
+        return { x: DX[d], y: DY[d] };
+      },
+      reset() {
+        maze(); seeds = Array.from({ length: R }, (_, r) => Array.from({ length: C }, (_, c) => wall[r][c] ? 0 : ((c % 2 === 1 && r % 2 === 1) || rand() < .35 ? 1 : 0))); left = 0;
+        for (const [c, r] of [[15, 1], [15, R - 2], [1, 9], [C - 2, 9]]) seeds[r][c] = 2;
+        ps = []; for (let i = 0; i < n; i++) { const p = { sc: 0, sleepHit: 0 }; respawn(p, i); p.out = .6; ps.push(p); seeds[p.r][p.c] = 0; }
+        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) if (seeds[r][c]) left++;
+        hawks = []; const hh = n === 2 ? [[15, 9]] : [[9, 9], [21, 9]]; for (const [c, r] of hh) hawks.push({ c, r, x: c, y: r, hc: c, hr: r, moving: false, dir: 0, togo: 0, sleep: 3.5 });
+        over = false; endT = 0; winner = -1; t = 0; msg = ''; anim = 0; pops = [];
+      },
+      update(dt) {
+        anim += dt; pops.forEach(q => { q.t += dt; }); pops = pops.filter(q => q.t < .8);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        t += dt;
+        for (let i = 0; i < n; i++) {
+          const p = ps[i], s = api.input(i); p.out -= dt; p.pw -= dt; p.inv = (p.inv || 0) - dt; p.hit = (p.hit || 0) - dt; if (p.out > 0) continue;
+          if (Math.abs(s.x) > .5 || Math.abs(s.y) > .5) p.want = Math.abs(s.x) >= Math.abs(s.y) ? (s.x > 0 ? 0 : 2) : (s.y > 0 ? 1 : 3);
+          if (p.moving && p.want >= 0 && p.want === (p.dir + 2) % 4) { p.c += DX[p.dir]; p.r += DY[p.dir]; p.dir = p.want; p.togo = 1 - p.togo; }
+          step(p, 5.6, dt, e => (e.want >= 0 && open(e.c, e.r, e.want)) ? e.want : (open(e.c, e.r, e.dir) ? e.dir : -1));
+          const cc = Math.round(p.x), rr = Math.round(p.y);
+          if (Math.abs(p.x - cc) < .5 && Math.abs(p.y - rr) < .5 && seeds[rr] && seeds[rr][cc]) { const v = seeds[rr][cc]; seeds[rr][cc] = 0; left--; p.sc++; if (v === 2) { p.pw = 6; api.beep('win'); } else api.beep('eat'); }
+        }
+        const hs = 4.2 + Math.min(1.4, t * .012);
+        for (const h of hawks) {
+          h.sleep -= dt; if (h.sleep > 0) continue;
+          const live = ps.filter(p => p.out <= 0), scared = live.length && live.every(p => p.pw > 0);
+          step(h, hs * (scared ? .7 : 1), dt, e => {
+            const o = []; for (let k = 0; k < 4; k++) if (open(e.c, e.r, k) && k !== (e.dir + 2) % 4) o.push(k); if (!o.length) return (e.dir + 2) % 4;
+            const L = api.cpu; if (o.length > 1 && rand() < [.3, .16, .06][L]) return o[irand(0, o.length - 1)];
+            let tg = null, bd = 1e9; for (const p of live) { const d = Math.abs(p.c - e.c) + Math.abs(p.r - e.r) + (p.pw > 0 ? 6 : 0); if (d < bd) { bd = d; tg = p; } }
+            if (!tg) return o[0];
+            if (scared) { let b = -1, bv = -1; for (const k of o) { const v = Math.abs(tg.c - (e.c + DX[k])) + Math.abs(tg.r - (e.r + DY[k])); if (v > bv) { bv = v; b = k; } } return b; }
+            const d = bfs(e.c, e.r, (c, r) => c === tg.c && r === tg.r); return d >= 0 && d !== (e.dir + 2) % 4 ? d : o[irand(0, o.length - 1)];
+          });
+          for (let i = 0; i < n; i++) { const p = ps[i]; if (p.out > 0 || p.inv > 0) continue; if (Math.hypot(p.x - h.x, p.y - h.y) < .62) {
+            if (p.pw > 0) { p.sc += 8; h.c = h.hc; h.r = h.hr; h.x = h.c; h.y = h.r; h.moving = false; h.sleep = 4; api.beep('hit'); pops.push({ x: pxx(p), y: pyy(p), t: 0, v: '+8', c: col(i) }); }
+            else { const lose = Math.min(p.sc, 5); p.sc -= lose; respawn(p, i); h.c = h.hc; h.r = h.hr; h.x = h.c; h.y = h.r; h.moving = false; h.sleep = 2.5; api.beep('die'); pops.push({ x: pxx(h), y: pyy(h), t: 0, v: '-' + lose, c: '#FF4A3D' }); }
+          } }
+        }
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { const a = ps[i], b = ps[j]; if (a.out > 0 || b.out > 0 || (a.pw > 0) === (b.pw > 0)) continue; if (Math.hypot(a.x - b.x, a.y - b.y) < .62) { const w = a.pw > 0 ? a : b, l = w === a ? b : a, wi = w === a ? i : j, li = w === a ? j : i; if ((l.hit || 0) > 0) continue; const take = Math.min(l.sc, 4); l.sc -= take; w.sc += take; l.hit = 1.2; l.out = .9; respawn(l, li); l.out = .9; api.beep('hit'); pops.push({ x: pxx(w), y: pyy(w), t: 0, v: '+' + take, c: col(wi) }); } }
+        if (left <= 0 || t >= TIME) { over = true; endT = 1.3; const top = Math.max(...ps.map(p => p.sc)), w = ps.map((p, i) => p.sc === top ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; msg = left <= 0 ? 'All seeds eaten.' : 'Time.'; }
+      },
+      draw(g) {
+        g.fillStyle = '#0B131B'; g.fillRect(0, 0, W, H);
+        g.fillStyle = '#0F1A24'; g.fillRect(OX - 6, OY - 6, C * CS + 12, R * CS + 12);
+        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+          const x = OX + c * CS, y = OY + r * CS;
+          if (wall[r][c]) { g.fillStyle = '#2F5D4A'; D.rr(g, x + 1, y + 1, CS - 2, CS - 2, 7); g.fill(); g.fillStyle = '#3B7359'; D.rr(g, x + 3, y + 3, CS - 6, CS - 10, 5); g.fill(); }
+          else if (seeds[r][c] === 1) D.disc(g, x + CS / 2, y + CS / 2, 3, '#E8D9A0');
+          else if (seeds[r][c] === 2) D.disc(g, x + CS / 2, y + CS / 2, 7 + Math.sin(anim * 8) * 1.5, '#FFC933');
+        }
+        for (const h of hawks) {
+          const x = pxx(h), y = pyy(h), live = ps.filter(p => p.out <= 0), scared = live.length && live.every(p => p.pw > 0), z = h.sleep > 0;
+          g.globalAlpha = z ? .45 : 1; D.disc(g, x, y + 2, 12, 'rgba(0,0,0,.3)'); D.disc(g, x, y, 13, scared ? '#9B7BE0' : '#2B2F3A'); D.disc(g, x - 1, y - 9, 3, scared ? '#9B7BE0' : '#2B2F3A'); D.disc(g, x + 5, y - 9, 3, scared ? '#9B7BE0' : '#2B2F3A');
+          g.fillStyle = '#FFC933'; g.beginPath(); g.moveTo(x + 8, y - 1); g.lineTo(x + 17, y + 3); g.lineTo(x + 8, y + 6); g.fill();
+          D.disc(g, x + 2, y - 4, 3.5, '#fff'); D.disc(g, x + 3, y - 4, 1.8, '#E5333D'); g.globalAlpha = 1;
+        }
+        for (let i = 0; i < n; i++) {
+          const p = ps[i]; if (p.out > 0 && Math.floor(anim * 8) % 2) continue; const x = pxx(p), y = pyy(p);
+          if (p.pw > 0 || p.inv > 0) { g.globalAlpha = p.inv > 0 && p.pw <= 0 ? .2 : p.pw < 1.5 && Math.floor(anim * 10) % 2 ? .15 : .35; D.disc(g, x, y, 21, '#FFC933'); g.globalAlpha = 1; }
+          D.disc(g, x, y + 2, 12, 'rgba(0,0,0,.3)'); D.disc(g, x, y, 12, col(i)); D.disc(g, x - 3, y - 4, 3.6, '#fff'); D.disc(g, x + 4, y - 4, 3.6, '#fff'); D.disc(g, x - 2, y - 4, 1.8, '#10161C'); D.disc(g, x + 5, y - 4, 1.8, '#10161C');
+          g.fillStyle = '#FFC933'; g.beginPath(); g.moveTo(x - 3, y + 1); g.lineTo(x + 7, y + 1); g.lineTo(x + 2, y + 8); g.fill();
+        }
+        for (const q of pops) { g.globalAlpha = 1 - q.t / .8; D.text(g, q.v, q.x, q.y - q.t * 40, 20, q.c); g.globalAlpha = 1; }
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Draw') : 'Seed Chase  ' + Math.max(0, Math.ceil(TIME - t)) + 's', W / 2, 22, 24, over && winner >= 0 ? col(winner) : SCR.fg);
+        for (let i = 0; i < n; i++) D.text(g, api.players[i].name + '  ' + ps[i].sc, 100 + i * (W - 200) / Math.max(1, n - 1), 590, 16, col(i));
+      }
+    };
+  }
+});
+
+/* ---------- Echo Pads ---------- */
+registerGame({
+  id: 'echo', cpu: true, title: 'Echo Pads', blurb: 'Watch the pads light up, then repeat the pattern before anyone else. One slip and you are out.',
+  kind: 'live', min: 2, max: 4, color: 3,
+  help: 'Four pads light up in a pattern. When it ends, everybody repeats it at the same time: tap a pad, or press the stick or arrow keys up, right, down or left. The pattern grows by one each round and gets faster. A wrong pad, or running out of time, knocks you out. Last one standing wins. If everyone falls in the same round, whoever got furthest wins.',
+  touch: 'Tap the pads in the same order they lit up.',
+  icon() { return `<svg viewBox="0 0 200 125"><rect x="22" y="12" width="74" height="46" rx="12" fill="#0F1923"/><rect x="104" y="12" width="74" height="46" rx="12" fill="none" stroke="#0F1923" stroke-width="6"/><rect x="22" y="66" width="74" height="46" rx="12" fill="none" stroke="#0F1923" stroke-width="6"/><rect x="104" y="66" width="74" height="46" rx="12" fill="#0F1923"/></svg>`; },
+  create(api) {
+    const n = api.n, col = i => api.players[i].color, PADS = [{ x: 480, y: 188, c: '#FF6B5B', d: 'Up' }, { x: 700, y: 332, c: '#4B9BFF', d: 'Right' }, { x: 480, y: 476, c: '#FFC933', d: 'Down' }, { x: 260, y: 332, c: '#3DDC97', d: 'Left' }], PW = 190, PH = 118;
+    let seq, phase, t, showI, ps, lit, over, endT, winner, msg, round, limit, anim, st;
+    const stepT = () => Math.max(.26, .62 - round * .018);
+    function addStep() { seq.push(irand(0, 3)); }
+    function startShow() { phase = 'show'; t = .9; showI = -1; ps.forEach(p => { if (p.alive) { p.idx = 0; p.done = false; } }); }
+    function press(i, pad) {
+      const p = ps[i]; if (!p || !p.alive || p.done || phase !== 'input') return;
+      lit[pad] = .22; api.beep('select');
+      if (pad === seq[p.idx]) { p.idx++; p.prog = Math.max(p.prog, round * 100 + p.idx); if (p.idx >= seq.length) { p.done = true; p.t = limit - t; api.beep('place'); } }
+      else { p.alive = false; p.prog = Math.max(p.prog, round * 100 + p.idx); api.beep('die'); }
+    }
+    function hitPad(x, y) { for (let k = 0; k < 4; k++) if (Math.abs(x - PADS[k].x) < PW / 2 && Math.abs(y - PADS[k].y) < PH / 2) return k; return -1; }
+    return {
+      dbg: () => ({ round, phase, alive: ps.map(p => p.alive), len: seq.length }),
+      ai(i, dt) {
+        const p = ps[i]; if (!p || !p.alive || over || phase !== 'input' || p.done) return null;
+        const L = api.cpu, S = this.s || (this.s = []), z = S[i] || (S[i] = { w: 0, h: 0, r: -1 });
+        if (z.r !== round) { z.r = round; z.w = rand(.5, 1) + [.5, .2, 0][L]; z.h = 0; z.bad = rand() < [.25, .1, .035][L] * (1 + seq.length * .2); z.bi = irand(0, seq.length - 1); }
+        if (z.h > 0) { z.h--; const d = z.d; return { x: d === 1 ? 1 : d === 3 ? -1 : 0, y: d === 2 ? 1 : d === 0 ? -1 : 0 }; }
+        if (z.h === 0) { z.h = -1; return { x: 0, y: 0 }; }
+        z.w -= dt; if (z.w > 0) return null;
+        let d = seq[p.idx]; if (z.bad && p.idx === z.bi) d = (d + irand(1, 3)) % 4;
+        z.d = d; z.h = 4; z.w = [.46, .32, .22][L] + rand(0, .18); return { x: d === 1 ? 1 : d === 3 ? -1 : 0, y: d === 2 ? 1 : d === 0 ? -1 : 0 };
+      },
+      pointer(x, y, ty, i) { if (ty !== 'down' || over) return; const k = hitPad(x, y); if (k >= 0) press(i, k); },
+      reset() {
+        seq = []; round = 0; addStep(); ps = Array.from({ length: n }, () => ({ alive: true, idx: 0, done: false, prog: 0, t: 0 })); lit = [0, 0, 0, 0]; over = false; endT = 0; winner = -1; msg = ''; anim = 0; limit = 6; startShow(); t = 1.4;
+      },
+      update(dt) {
+        anim += dt; for (let k = 0; k < 4; k++) lit[k] = Math.max(0, lit[k] - dt);
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        if (phase === 'show') {
+          t -= dt; if (t <= 0) { showI++; if (showI >= seq.length) { phase = 'input'; limit = 2.6 + seq.length * .85; t = limit; return; } lit[seq[showI]] = stepT() * .8; api.beep('select'); t = stepT(); }
+        } else if (phase === 'input') {
+          for (let i = 0; i < n; i++) { const s = api.input(i); if (!ps[i].alive || ps[i].done) continue; if (s.pu) press(i, 0); else if (s.pr) press(i, 1); else if (s.pd) press(i, 2); else if (s.pl) press(i, 3); }
+          t -= dt;
+          const live = ps.filter(p => p.alive);
+          if (!live.length || live.every(p => p.done) || t <= 0) {
+            if (t <= 0) ps.forEach(p => { if (p.alive && !p.done) { p.alive = false; p.prog = Math.max(p.prog, round * 100 + p.idx); } });
+            const rem = ps.filter(p => p.alive);
+            if (rem.length === 0) { over = true; endT = 1.6; const top = Math.max(...ps.map(p => p.prog)), w = ps.map((p, i) => p.prog === top ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; msg = winner >= 0 ? 'Furthest pattern.' : 'Everyone slipped.'; }
+            else if (rem.length === 1 && n > 1) { over = true; endT = 1.6; winner = ps.indexOf(rem[0]); msg = 'Last one standing.'; }
+            else { round++; addStep(); phase = 'gap'; t = 1.1; api.beep('win'); }
+          }
+        } else if (phase === 'gap') { t -= dt; if (t <= 0) { startShow(); } }
+      },
+      draw(g) {
+        g.fillStyle = '#1B2330'; g.fillRect(0, 0, W, H);
+        for (let k = 0; k < 4; k++) { const P = PADS[k], on = lit[k] > 0; g.globalAlpha = on ? 1 : .38; D.rr(g, P.x - PW / 2, P.y - PH / 2 + 8, PW, PH, 26); g.fillStyle = 'rgba(0,0,0,.35)'; g.fill(); D.rr(g, P.x - PW / 2, P.y - PH / 2, PW, PH, 26); g.fillStyle = P.c; g.fill(); g.globalAlpha = 1; if (on) { g.globalAlpha = .35; D.rr(g, P.x - PW / 2 - 8, P.y - PH / 2 - 8, PW + 16, PH + 16, 32); g.fillStyle = P.c; g.fill(); g.globalAlpha = 1; } D.text(g, P.d, P.x, P.y, 26, 'rgba(15,25,35,.55)'); }
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : msg) : 'Echo Pads  round ' + (round + 1), W / 2, 34, 28, over && winner >= 0 ? col(winner) : SCR.fg);
+        D.text(g, phase === 'show' ? 'Watch' : phase === 'input' ? 'Your turn: ' + seq.length + ' long' : phase === 'gap' ? 'Nice. One longer next' : '', W / 2, 332, 24, SCR.fg);
+        if (phase === 'input') { g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(W / 2 - 110, 362, 220, 6); g.fillStyle = '#FFC933'; g.fillRect(W / 2 - 110, 362, 220 * clamp(t / limit, 0, 1), 6); }
+        for (let i = 0; i < n; i++) {
+          const p = ps[i], x = 110 + i * (W - 220) / Math.max(1, n - 1), y = 548;
+          D.text(g, api.players[i].name + (p.alive ? '' : ' (out)'), x, y, 17, p.alive ? col(i) : SCR.dim);
+          for (let k = 0; k < Math.min(seq.length, 14); k++) { const a = p.alive && (p.done || k < p.idx) && phase === 'input'; D.disc(g, x - 7 * Math.min(seq.length, 14) / 2 + 3.5 + k * 7, y + 22, 2.6, a ? col(i) : 'rgba(255,255,255,.15)'); }
+        }
       }
     };
   }
