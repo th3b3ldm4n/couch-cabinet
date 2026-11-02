@@ -119,6 +119,15 @@ button,input,select{font:inherit;color:inherit}
 .hudr{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .stagewrap{width:min(100%,max(300px,calc((100vh - 200px)*1.6)));margin-inline:auto}
 .stagewrap:fullscreen{width:auto;display:grid;place-items:center;background:#000}
+.stagewrap:-webkit-full-screen{width:auto;display:grid;place-items:center;background:#000}
+.stagewrap:-webkit-full-screen .screen{width:min(100vw,160vh);border-radius:0;border:0}
+body.immersive{overflow:hidden}
+body.immersive #stage{position:fixed;inset:0;z-index:60;background:#05090E;display:flex;flex-direction:column;align-items:center;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+body.immersive .hud{width:100%;padding:4px 10px;margin:0}
+body.immersive .stagewrap{width:min(100vw,calc((100dvh - 52px)*1.6));margin:auto}
+body.immersive .screen{border-radius:0;border:0}
+body.immersive .help,body.immersive .top{display:none}
+body.immersive .touchpad{position:fixed;left:0;right:0;bottom:0;z-index:61}
 .screen{position:relative;width:100%;aspect-ratio:16/10;background:var(--screen);border:1px solid var(--screen-line);border-radius:14px;overflow:hidden}
 .stagewrap:fullscreen .screen{width:min(100vw,160vh);border-radius:0;border:0}
 .toon{position:absolute;inset:0;pointer-events:none;border-radius:inherit;opacity:0;transition:opacity .2s;background:radial-gradient(ellipse at 50% 45%,rgba(255,236,190,.0) 55%,rgba(40,20,0,.38) 100%),url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .25  0 0 0 0 .18  0 0 0 0 .1  0 0 0 .55 0'/></filter><rect width='220' height='220' filter='url(%23n)'/></svg>");mix-blend-mode:multiply}
@@ -328,7 +337,7 @@ body{min-height:100dvh}
           <button class="btn ghost" id="leave" type="button">Leave room</button>
         </div>
       </div>
-      <p class="hint">Two players, each on their own screen. Send your friend the invite link and they join your room. If this page is private, they need access to it first. Online matches run the same game on both screens and only send button presses.</p>
+      <p class="hint">Up to four players, each on their own screen. Send the invite link and they join your room. If this page is private, they need access to it first. Online matches run the same game on both screens and only send button presses.</p>
     </section>
 
     <section id="gamesec" aria-labelledby="games-h">
@@ -488,6 +497,7 @@ const D = {
 };
 
 /* ---------- sound (tiny synth, starts after first interaction) ---------- */
+const Juice = { sh: 0, fl: 0, hit(n) { const A = { hit: 5, shot: 9, win: 12, no: 6, boom: 14, crash: 12, pop: 3, wall: 2, dash: 2, place: 4 }; const v = A[n]; if (v) { this.sh = Math.max(this.sh, v); if (v >= 9) this.fl = .18; } } };
 const Sound = (() => {
   let ac = null, muted = store.get('muted', false);
   const ctx = () => { if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { } } return ac; };
@@ -534,6 +544,8 @@ const NONE = Object.freeze({ x: 0, y: 0, a: false, b: false, pa: false, pb: fals
 const GAMEKEYS = new Set(['Space', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 Object.values(KEYMAPS).forEach(m => ['up', 'down', 'left', 'right', 'a', 'b'].forEach(k => m[k].forEach(c => GAMEKEYS.add(c))));
 const Touch = { up: false, down: false, left: false, right: false, a: false, b: false, ax: 0, ay: 0 };
+/* one virtual pad per touch seat, so two or more players can share a single screen (seat 0 is the Touch object above) */
+const TouchK = [Touch, ...[1, 2, 3].map(() => ({ a: false, b: false, ax: 0, ay: 0, la: false, lb: false }))];
 const KN = { Space: 'Space', ShiftRight: 'Right Shift', Slash: '/', Period: '.', NumpadDecimal: 'Num .', Numpad0: 'Num 0', NumpadEnter: 'Num Enter', Enter: 'Enter' };
 const keyName = k => KN[k] || k.replace(/^Key/, '');
 const legend = id => { if (id === 'cpu') return 'Computer player'; const m = KEYMAPS[id]; if (m) return `${m.short.split(' (')[0]} to move · A = ${m.a.map(keyName).join(' or ')} · B = ${m.b.map(keyName).join(' or ')}`; return id === 'touch' ? 'Mouse or touch: click, tap or drag the game itself' : 'Stick or D-pad to move · A and B buttons'; };
@@ -639,14 +651,25 @@ const PeerRoom = (() => {
     let detail = 'Contacting the matchmaking service...';
     const Peer = await load(), hostId = 'ccab-' + code.replace(/[^a-z0-9]/gi, '').toLowerCase();
     const myId = 'me-' + Math.random().toString(36).slice(2, 8);
-    let mine = {}, remote = null, conn = null, peer = null, cache = null, ver = 0, dead = false, isHost = false, tries = 0;
+    let mine = {}, remotes = new Map(), conns = new Set(), conn = null, peer = null, cache = null, ver = 0, dead = false, isHost = false, tries = 0;
     const touch = () => { cache = null; };
+    const sendTo = (c, o) => { try { if (c && c.open) c.send(typeof o === 'string' ? o : JSON.stringify(o)); } catch (e) { } };
     const wire = c => {
-      conn = c;
-      c.on('data', d => { try { const o = typeof d === 'string' ? JSON.parse(d) : d; if (o && o.p) { remote = { peer: 'remote', presence: o.p, upd: ++ver }; touch(); } } catch (e) { } });
-      c.on('close', () => { if (conn === c) { remote = null; conn = null; touch(); detail = isHost ? 'Your friend left. Waiting for them to rejoin.' : 'Disconnected from the host.'; } });
+      conn = isHost ? conn : c; conns.add(c); c.u = null;
+      c.on('data', d => { try {
+        const o = typeof d === 'string' ? JSON.parse(d) : d;
+        if (o && o.p && o.p.u) {
+          if (isHost) { c.u = o.p.u; for (const x of conns) if (x !== c) sendTo(x, JSON.stringify(o)); }
+          remotes.set(o.p.u, { presence: o.p, upd: ++ver, c }); touch();
+        } else if (o && o.left) { remotes.delete(o.left); touch(); }
+      } catch (e) { } });
+      c.on('close', () => {
+        conns.delete(c);
+        if (isHost) { for (const [u, r] of [...remotes]) if (r.c === c) { remotes.delete(u); for (const x of conns) sendTo(x, { left: u }); } touch(); detail = 'A player left. Waiting for others.'; }
+        else if (conn === c) { remotes.clear(); conn = null; touch(); detail = 'Disconnected from the host.'; }
+      });
       c.on('error', e => { detail = 'Link error: ' + ((e && (e.type || e.message)) || 'unknown'); });
-      const hello = () => { detail = 'Linked to your friend.'; try { c.send(JSON.stringify({ p: mine })); } catch (e) { } };
+      const hello = () => { detail = 'Linked.'; sendTo(c, { p: mine }); if (isHost) for (const r of remotes.values()) if (r.c !== c) sendTo(c, { p: r.presence }); };
       if (c.open) hello(); else c.on('open', hello);
     };
     const opened = mk => new Promise((res, rej) => {
@@ -662,21 +685,21 @@ const PeerRoom = (() => {
       const c = peer.connect(hostId, { reliable: true }); wire(c);
       setTimeout(() => { if (!dead && conn === c && !c.open) { try { c.close(); } catch (e) { } conn = null; if (tries < 3) linkTo(); else detail = 'Could not link to the host. One of your networks may be blocking direct connections. Try Wi-Fi on both, or use a different network.'; } }, 14000);
     };
-    try { peer = await opened(() => new Peer(hostId, ICE)); isHost = true; detail = 'Matchmaking connected. Waiting for your friend to open the link. Keep this tab open.'; watch(peer); peer.on('connection', c => { if (conn && conn.open) { try { c.close(); } catch (e) { } return; } detail = 'Friend found. Linking...'; wire(c); }); }
+    try { peer = await opened(() => new Peer(hostId, ICE)); isHost = true; detail = 'Matchmaking connected. Waiting for players to open the link. Keep this tab open.'; watch(peer); peer.on('connection', c => { if (conns.size >= 3) { try { c.close(); } catch (e) { } return; } detail = 'Player found. Linking...'; wire(c); }); }
     catch (e) {
       if (e && e.type === 'unavailable-id') { peer = await opened(() => new Peer(undefined, ICE)); watch(peer); linkTo(); }
       else { const er = Object.assign(new Error('net'), { code: 'network' }); er.type = (e && e.type) || 'unknown'; throw er; }
     }
     return {
       detail: () => detail,
-      presence: async patch => { Object.assign(mine, patch); touch(); if (conn && conn.open) { try { conn.send(JSON.stringify({ p: mine })); } catch (e) { } } },
+      presence: async patch => { Object.assign(mine, patch); touch(); const m = JSON.stringify({ p: mine }); for (const c of conns) sendTo(c, m); },
       peers: () => {
         if (cache) return cache; const me = Object.freeze({ peer: myId, by: null, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: JSON.parse(JSON.stringify(mine)), updatedAt: ++ver });
-        const out = [me]; if (remote) out.push(Object.freeze({ peer: 'remote', by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: remote.presence, updatedAt: remote.upd }));
+        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd }));
         return (cache = Object.freeze(out));
       },
       onPeers() { return () => { }; }, onConnection() { return () => { }; },
-      leave: async () => { dead = true; try { if (conn) conn.close(); } catch (e) { } try { if (peer) peer.destroy(); } catch (e) { } }
+      leave: async () => { dead = true; try { for (const c of conns) c.close(); } catch (e) { } try { if (peer) peer.destroy(); } catch (e) { } }
     };
   }
   return { join };
@@ -686,13 +709,13 @@ const PeerRoom = (() => {
 const WsRoom = (() => {
   async function join(code) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:', url = proto + '//' + location.host + '/ws?room=' + encodeURIComponent(code);
-    let detail = 'Connecting to the game server...', mine = {}, remote = null, cache = null, ver = 0, dead = false, ws = null, ever = false;
+    let detail = 'Connecting to the game server...', mine = {}, remotes = new Map(), cache = null, ver = 0, dead = false, ws = null, ever = false;
     const myId = 'me-' + Math.random().toString(36).slice(2, 8), touch = () => { cache = null; };
     const send = o => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); } catch (e) { } };
     const connect = () => new Promise((res, rej) => {
       let opened = false; const w = new WebSocket(url); ws = w; const t = setTimeout(() => { if (!opened) { try { w.close(); } catch (e) { } rej({ type: 'timeout' }); } }, 10000);
-      w.onopen = () => { opened = true; ever = true; clearTimeout(t); detail = remote ? 'Linked to your friend.' : 'Connected. Waiting for your friend to open the link. Keep this tab open.'; send({ p: mine }); res(); };
-      w.onmessage = ev => { try { const o = JSON.parse(ev.data); if (o.p) { remote = { presence: o.p, upd: ++ver }; touch(); detail = 'Linked to your friend.'; } else if (o.left) { remote = null; touch(); detail = 'Your friend left. Waiting for them to rejoin.'; } else if (o.full) { detail = 'This room already has two players.'; } } catch (e) { } };
+      w.onopen = () => { opened = true; ever = true; clearTimeout(t); detail = remotes.size ? 'Linked.' : 'Connected. Waiting for players to open the link. Keep this tab open.'; send({ p: mine }); res(); };
+      w.onmessage = ev => { try { const o = JSON.parse(ev.data); if (o.p && o.p.u) { remotes.set(o.p.u, { presence: o.p, upd: ++ver }); touch(); detail = 'Linked.'; } else if (o.left) { remotes.delete(o.left); touch(); detail = 'A player left.'; } else if (o.full) { detail = 'This room is full.'; } } catch (e) { } };
       w.onerror = () => { if (!opened) { clearTimeout(t); rej({ type: 'socket' }); } };
       w.onclose = () => { if (ws !== w || dead) return; clearTimeout(t); if (opened) { detail = 'Connection lost. Reconnecting...'; setTimeout(() => { if (!dead) connect().catch(() => { detail = 'Reconnecting...'; }); }, 1200); } };
     });
@@ -703,7 +726,7 @@ const WsRoom = (() => {
       presence: async patch => { Object.assign(mine, patch); touch(); send({ p: mine }); },
       peers: () => {
         if (cache) return cache; const me = Object.freeze({ peer: myId, by: null, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: JSON.parse(JSON.stringify(mine)), updatedAt: ++ver });
-        const out = [me]; if (remote) out.push(Object.freeze({ peer: 'remote', by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: remote.presence, updatedAt: remote.upd }));
+        const out = [me]; for (const [u, r] of remotes) out.push(Object.freeze({ peer: u, by: null, isMe: false, sameTab: false, kind: 'viewer', guest: false, presence: r.presence, updatedAt: r.upd }));
         return (cache = Object.freeze(out));
       },
       onPeers() { return () => { }; }, onConnection() { return () => { }; },
@@ -714,50 +737,56 @@ const WsRoom = (() => {
 })();
 
 const Net = (() => {
-  const hooks = {};
+  const hooks = {}, MAXH = 4, U = 'u' + Math.random().toString(36).slice(2, 10);
   let capP = null, nr = null, code = '', nick = 'Player', myAv = null, myT = 0, connecting = false, failed = false;
   let logSeq = 0, log = [], seen = {}, dirty = false, mid = 0;
-  let my = [], rf = [], rnext = 0, remoteAck = 0, chk = {}, rchk = {}, myCh = null;
-  let ro = { status: 'idle', host: false, remote: null, names: ['Player', 'Player'] }, roSig = '', lastPres = null, goneAt = 0, hadRemote = false;
+  let my = [], rf = {}, rnext = {}, rack = {}, chk = {}, rchk = {}, myCh = null, members = [];
+  const EMPTY = () => ({ status: 'idle', host: false, me: -1, remotes: [], names: ['Player', 'Player'], avs: [null, null], uids: [] });
+  let ro = EMPTY(), roSig = '', lastPres = {}, goneAt = 0, peak = 0;
 
   const getCap = () => capP || (capP = (async () => { try { return (window.claude && window.claude.use) ? await window.claude.use('room') : null; } catch (e) { return null; } })());
 
   function roster() {
-    if (!nr) return { status: connecting ? 'connecting' : failed ? 'unavailable' : 'idle', host: false, remote: null, names: ['Player', 'Player'] };
+    if (!nr) return Object.assign(EMPTY(), { status: connecting ? 'connecting' : failed ? 'unavailable' : 'idle' });
     let ps = [];
-    try { ps = nr.peers().filter(p => p.kind === 'viewer' && p.presence && p.presence.app === 'cc1'); } catch (e) { }
+    try { ps = nr.peers().filter(p => p.kind === 'viewer' && p.presence && p.presence.app === 'cc1' && p.presence.u); } catch (e) { }
     ps.sort((a, b) => (a.presence.t - b.presence.t) || (a.peer < b.peer ? -1 : 1));
-    const list = ps.slice(0, 2), me = list.findIndex(p => p.isMe && p.sameTab);
+    const list = ps.slice(0, MAXH), me = list.findIndex(p => p.isMe && p.sameTab);
     const status = list.length < 2 ? 'waiting' : me < 0 ? 'full' : 'ready';
-    if (status !== 'ready') return { status, host: false, remote: null, names: ['Player', 'Player'] };
-    return { status, host: me === 0, remote: list[1 - me], names: list.map(p => String(p.presence.nick || 'Player').slice(0, 14)), avs: list.map(p => p.presence.av || null) };
+    if (status !== 'ready') return Object.assign(EMPTY(), { status });
+    return { status, host: me === 0, me, remotes: list.filter((p, i) => i !== me), names: list.map(p => String(p.presence.nick || 'Player').slice(0, 14)), avs: list.map(p => p.presence.av || null), uids: list.map(p => p.presence.u) };
   }
   function flush() {
     if (!nr || !dirty) return; dirty = false;
-    const from = Math.min(remoteAck, my.length);
-    try { nr.presence({ app: 'cc1', nick, av: myAv, t: myT, log, mid, f0: from, fr: my.slice(from, from + 240), ack: rnext, ch: myCh }).catch(() => { }); } catch (e) { }
+    let from = my.length; for (const u of members) from = Math.min(from, rack[u] === undefined ? 0 : rack[u]);
+    const ack = {}; for (const u of members) ack[u] = rnext[u];
+    try { nr.presence({ app: 'cc1', u: U, nick, av: myAv, t: myT, log, mid, f0: from, fr: my.slice(from, from + 240), ack, ch: myCh }).catch(() => { }); } catch (e) { }
   }
-  function cmp(t) {
-    if (chk[t] !== undefined && rchk[t] !== undefined) { const bad = chk[t] !== rchk[t]; delete chk[t]; delete rchk[t]; if (bad && hooks.desync) hooks.desync(t); }
+  function cmp(t, u) {
+    const r = rchk[u]; if (chk[t] !== undefined && r && r[t] !== undefined) { const bad = chk[t] !== r[t]; delete r[t]; if (bad && hooks.desync) hooks.desync(t); }
   }
   function processRemote(rem) {
-    const p = rem.presence, key = rem.peer;
+    const p = rem.presence, key = p.u;
     if (Array.isArray(p.log)) for (const e of p.log) {
       if (Array.isArray(e) && e[0] > (seen[key] || 0)) { seen[key] = e[0]; if (hooks.msg) hooks.msg(e[1], e[0]); }
     }
-    if (mid && p.mid === mid) {
+    if (mid && p.mid === mid && members.includes(key)) {
+      const R = rf[key];
       if (Array.isArray(p.fr) && typeof p.f0 === 'number') {
-        for (let i = 0; i < p.fr.length; i++) { const t = p.f0 + i; if (rf[t] === undefined) rf[t] = p.fr[i]; }
-        const before = rnext; while (rf[rnext] !== undefined) rnext++; if (rnext !== before) dirty = true;
+        for (let i = 0; i < p.fr.length; i++) { const t = p.f0 + i; if (R[t] === undefined) R[t] = p.fr[i]; }
+        const before = rnext[key]; while (R[rnext[key]] !== undefined) rnext[key]++; if (rnext[key] !== before) dirty = true;
       }
-      if (typeof p.ack === 'number') remoteAck = Math.max(remoteAck, p.ack);
-      if (Array.isArray(p.ch) && rchk[p.ch[0]] === undefined) { rchk[p.ch[0]] = p.ch[1]; cmp(p.ch[0]); }
+      if (p.ack && typeof p.ack[U] === 'number') rack[key] = Math.max(rack[key], p.ack[U]);
+      if (Array.isArray(p.ch)) { (rchk[key] || (rchk[key] = {}))[p.ch[0]] = p.ch[1]; cmp(p.ch[0], key); }
     }
   }
   return {
-    hooks,
+    hooks, uid: U,
     active: () => !!nr,
-    info() { return { status: ro.status, host: ro.host, code, detail: (nr && nr.detail) ? nr.detail() : '', names: ro.names, avs: ro.avs || [null, null], remoteNick: ro.remote ? String(ro.remote.presence.nick || 'Player').slice(0, 14) : '' }; },
+    info() {
+      const o = ro.names.filter((n, i) => i !== ro.me);
+      return { status: ro.status, host: ro.host, me: ro.me, uids: ro.uids, count: ro.names.length, code, detail: (nr && nr.detail) ? nr.detail() : '', names: ro.names, avs: ro.avs || [], remoteNick: o.join(', ') };
+    },
     setNick(n) { nick = n || 'Player'; dirty = true; },
     setAv(id) { myAv = id || null; dirty = true; },
     async join(c) {
@@ -768,36 +797,36 @@ const Net = (() => {
         else if (window.__CC_WS) { try { nr = await WsRoom.join(c); } catch (e1) { nr = await PeerRoom.join(c); } }
         else nr = await PeerRoom.join(c);
       } catch (e) { nr = null; connecting = false; failed = !cap; if (hooks.status) hooks.status(); return { ok: false, err: cap ? ((e && e.code) || 'failed') : 'unavailable', detail: e && (e.type || e.message) }; }
-      connecting = false; code = c; myT = Date.now(); logSeq = 0; log = []; seen = {}; mid = 0; hadRemote = false; goneAt = 0; lastPres = null; roSig = '';
+      connecting = false; code = c; myT = Date.now(); logSeq = 0; log = []; seen = {}; mid = 0; members = []; peak = 0; goneAt = 0; lastPres = {}; roSig = '';
       dirty = true; flush(); return { ok: true };
     },
     async leave() {
-      const r = nr; nr = null; code = ''; mid = 0; hadRemote = false; ro = { status: 'idle', host: false, remote: null, names: ['Player', 'Player'] }; roSig = '';
+      const r = nr; nr = null; code = ''; mid = 0; members = []; peak = 0; ro = EMPTY(); roSig = '';
       try { if (r) await r.leave(); } catch (e) { }
       if (hooks.status) hooks.status();
     },
     send(msg) { const n = ++logSeq; log.push([n, msg]); if (log.length > 8) log.shift(); dirty = true; flush(); return n; },
-    beginMatch(id) {
-      mid = id; my = Array(D_TICKS).fill(NEUTRAL); rf = Array(D_TICKS).fill(NEUTRAL); rnext = D_TICKS; remoteAck = D_TICKS; chk = {}; rchk = {}; myCh = null; dirty = true;
+    beginMatch(id, uids) {
+      mid = id; members = (uids || ro.uids).filter(u => u !== U); my = Array(D_TICKS).fill(NEUTRAL); rf = {}; rnext = {}; rack = {};
+      for (const u of members) { rf[u] = Array(D_TICKS).fill(NEUTRAL); rnext[u] = D_TICKS; rack[u] = D_TICKS; }
+      chk = {}; rchk = {}; myCh = null; peak = members.length; dirty = true;
     },
     produced: () => my.length,
     pushFrame(v) { my.push(v); dirty = true; },
-    myFrame: t => my[t],
-    remoteFrame: t => rf[t],
-    reportHash(t, hh) { chk[t] = hh; myCh = [t, hh]; dirty = true; cmp(t); },
+    /* frames for tick t from every human in `uids` order; undefined while any is still on the wire */
+    frames(t, uids) { const out = []; for (const u of uids) { const f = u === U ? my[t] : (rf[u] ? rf[u][t] : undefined); if (f === undefined) return undefined; out.push(f); } return out; },
+    reportHash(t, hh) { chk[t] = hh; myCh = [t, hh]; dirty = true; for (const u of members) cmp(t, u); for (const k in chk) if (+k < t - 3000) delete chk[k]; },
     flush,
     poll() {
       if (!nr) return;
       ro = roster();
       const sig = ro.status + '|' + ro.host + '|' + ro.names.join(',') + '|' + (nr.detail ? nr.detail() : '');
       if (sig !== roSig) { roSig = sig; if (hooks.status) hooks.status(); }
-      if (ro.remote) {
-        hadRemote = true; goneAt = 0;
-        if (ro.remote.presence !== lastPres) { lastPres = ro.remote.presence; processRemote(ro.remote); }
-      } else if (hadRemote) {
-        if (!goneAt) goneAt = performance.now();
-        else if (performance.now() - goneAt > 2500) { hadRemote = false; goneAt = 0; if (hooks.peerLeft) hooks.peerLeft(); }
-      }
+      for (const r of ro.remotes) { const k = r.presence.u; if (r.presence !== lastPres[k]) { lastPres[k] = r.presence; processRemote(r); } }
+      const have = ro.remotes.length;
+      if (have >= peak) { peak = have; goneAt = 0; }
+      else if (!goneAt) goneAt = performance.now();
+      else if (performance.now() - goneAt > 2500) { peak = have; goneAt = 0; if (hooks.peerLeft) hooks.peerLeft(); }
       flush();
     }
   };
@@ -909,20 +938,20 @@ const App = (() => {
     const info = Net.info(), idle = info.status === 'idle' || info.status === 'unavailable' || (info.status === 'connecting' && !info.code);
     $('#on-idle').hidden = !idle; $('#on-room').hidden = idle; $('#seatsec').hidden = !idle;
     const pill = $('#netpill');
-    const label = { idle: 'Offline', unavailable: 'Online unavailable', connecting: 'Connecting', waiting: 'Waiting for friend', ready: 'Friend connected', full: 'Room full' }[info.status] || 'Offline';
+    const label = { idle: 'Offline', unavailable: 'Online unavailable', connecting: 'Connecting', waiting: 'Waiting for players', ready: info.count + ' players here', full: 'Room full' }[info.status] || 'Offline';
     pill.textContent = label; pill.classList.toggle('live', info.status === 'ready');
     $('#rcode').textContent = (info.code || '').toUpperCase();
     $('#invite').value = info.code ? inviteLink(info.code) : '';
     let msg = '';
-    if (info.status === 'waiting') msg = (info.detail || 'Waiting for your friend. Send them the invite link or the room code.');
-    else if (info.status === 'ready') msg = info.host ? `${info.remoteNick} is here. Pick a game below to start.` : `You are in ${info.remoteNick}'s room. The host picks the game.`;
-    else if (info.status === 'full') msg = 'This room already has two players.';
+    if (info.status === 'waiting') msg = (info.detail || 'Waiting for players. Send them the invite link or the room code. Up to four can join.');
+    else if (info.status === 'ready') msg = info.host ? `${info.remoteNick} ${info.count > 2 ? 'are' : 'is'} here. Pick a game below to start.` : `You are in the room with ${info.remoteNick}. The host picks the game.`;
+    else if (info.status === 'full') msg = 'This room already has four players.';
     else if (info.status === 'connecting') msg = 'Connecting.';
     else if (info.status === 'unavailable') msg = 'Could not reach the online service. Check your connection and try again.';
     $('#rstatus').textContent = msg;
     $('#games-hint').textContent = idle
       ? 'Games with a player cap use the first seated players. On a controller, use the D-pad to pick a box and A to start.'
-      : (info.host ? 'You are the host. Click a game to start it for both of you. Use "Add computer players" to fill extra seats in games that allow more than two.' : 'Waiting for the host to pick a game.');
+      : (info.host ? 'You are the host. Click a game to start it for everyone in the room. Use "Add computer players" to fill extra seats.' : 'Waiting for the host to pick a game.');
   }
 
   /* ----- shelf ----- */
@@ -956,10 +985,11 @@ const App = (() => {
   /* ----- match flow ----- */
   const need = () => Math.ceil(match.bestOf / 2);
   function startGame(id) {
+    if (IS_COARSE && !isFs()) { try { setFs(true, false); } catch (e) { } }
     const def = Games.find(x => x.id === id); if (!def) return;
     const info = Net.info();
     if (info.status !== 'idle' && info.status !== 'unavailable') {
-      if (info.status !== 'ready') { toast(info.status === 'waiting' ? 'Waiting for your friend to join' : 'Not connected yet'); return; }
+      if (info.status !== 'ready') { toast(info.status === 'waiting' ? 'Waiting for players to join' : 'Not connected yet'); return; }
       if (!info.host) { toast('The host picks the game'); return; }
       hostStart(def.id, bestOf); return;
     }
@@ -977,24 +1007,26 @@ const App = (() => {
   function hostStart(gameId, bo) {
     const info = Net.info();
     const def0 = Games.find(x => x.id === gameId), want = +(($('#roomcpu') || {}).value) || 0;
-    const cpus = def0 && def0.cpu ? clamp(want, 0, Math.max(0, def0.max - 2)) : 0;
-    if (want && cpus < want) toast(cpus ? def0.title + ' fits only ' + cpus + ' computer player' + (cpus > 1 ? 's' : '') + ' here' : def0.title + ' is a two-player game, so no computer players were added');
-    const msg = { k: 'start', game: gameId, bestOf: bo, seed: (Math.random() * 4294967296) >>> 0, names: info.names, avs: info.avs, d: +($('#lag').value) || 6, cpus, lvl: cpuLevel() };
+    const nh0 = def0 ? Math.min(info.count, def0.max) : 2, cpus = def0 && def0.cpu ? clamp(want, 0, Math.max(0, def0.max - nh0)) : 0;
+    if (want && cpus < want) toast(cpus ? def0.title + ' fits only ' + cpus + ' computer player' + (cpus > 1 ? 's' : '') + ' here' : def0.title + ' has no room for computer players here');
+    const msg = { k: 'start', game: gameId, bestOf: bo, seed: (Math.random() * 4294967296) >>> 0, names: info.names, avs: info.avs, uids: info.uids, d: +($('#lag').value) || 6, cpus, lvl: cpuLevel() };
     const n = Net.send(msg);
-    launchOnline(msg, n, 0);
+    launchOnline(msg, n);
   }
-  function launchOnline(msg, n, li) {
+  function launchOnline(msg, n) {
     const def = Games.find(x => x.id === msg.game);
     if (!def) { toast('That game is not on this version of the page. Reload the page.'); return; }
-    D_TICKS = clamp(+msg.d || 8, 3, 12); Net.beginMatch(n);
-    const players = [0, 1].map(i => ({ seat: i, idx: i, name: String(msg.names[i] || 'Player').slice(0, 14), color: PCOL[i], device: myDev, char: (msg.avs && Roster.has(msg.avs[i])) ? msg.avs[i] : null }));
-    const nc = clamp(+msg.cpus || 0, 0, Math.max(0, def.max - 2)); if (def.cpu) for (let k = 0; k < nc; k++) players.push({ seat: 2 + k, idx: 2 + k, name: 'CPU' + (nc > 1 ? ' ' + (k + 1) : ''), color: PCOL[2 + k], device: 'cpu', char: null });
-    launch(def, players, { online: true, li, seed: msg.seed, bestOf: msg.bestOf, dev: myDev, lvl: clamp(+msg.lvl, 0, 2) });
+    const uids = Array.isArray(msg.uids) && msg.uids.length ? msg.uids : Net.info().uids, P = Math.min(uids.length, def.max), li0 = uids.indexOf(Net.uid), li = li0 >= 0 && li0 < P ? li0 : -1;
+    D_TICKS = clamp(+msg.d || 8, 3, 12); Net.beginMatch(n, uids);
+    const players = Array.from({ length: P }, (_, i) => ({ seat: i, idx: i, name: String(msg.names[i] || 'Player').slice(0, 14), color: PCOL[i], device: myDev, char: (msg.avs && Roster.has(msg.avs[i])) ? msg.avs[i] : null }));
+    const nc = clamp(+msg.cpus || 0, 0, Math.max(0, def.max - P)); if (def.cpu) for (let k = 0; k < nc; k++) players.push({ seat: P + k, idx: P + k, name: 'CPU' + (nc > 1 ? ' ' + (k + 1) : ''), color: PCOL[P + k], device: 'cpu', char: null });
+    launch(def, players, { online: true, li, humans: uids, nh: P, seed: msg.seed, bestOf: msg.bestOf, dev: myDev, lvl: clamp(+msg.lvl, 0, 2) });
+    if (li < 0) setTimeout(() => toast('This game has ' + def.max + ' seats, so you are watching this one'), 400);
   }
   function launch(def, players, o) {
     const m = match = {
       def, players, n: players.length, bestOf: o.bestOf, wins: players.map(() => 0), round: 1, state: 'count', t: 0, turn: -1, prev: 'play',
-      ovAt: 0, ovPrimary: null, ovSecondary: null, done: -1, seed: o.seed >>> 0, online: !!o.online, li: o.li == null ? -1 : o.li, dev: o.dev, lvl: o.lvl,
+      ovAt: 0, ovPrimary: null, ovSecondary: null, done: -1, seed: o.seed >>> 0, online: !!o.online, li: o.li == null ? -1 : o.li, humans: o.humans || [], nh: o.nh || 0, dev: o.dev, lvl: o.lvl,
       tick: 0, acc: 0, st: [], pd: [], auto: 0, autoFn: null, stall: 0, lastN: -1
     };
     m.pd = players.map(() => ({ a: false, b: false, u: false, d: false, l: false, r: false }));
@@ -1002,7 +1034,7 @@ const App = (() => {
     Rng.seed(m.seed); Input.clearLatch();
     const api = {
       players, n: players.length, W, H, me: m.li, col: i => players[i].color,
-      cpu: m.online ? (m.lvl == null ? 1 : m.lvl) : cpuLevel(), input: i => m.st[i] || NONE, endRound, turn: setTurn, beep: Sound.play, now: () => m.tick * TICK * 1000
+      cpu: m.online ? (m.lvl == null ? 1 : m.lvl) : cpuLevel(), input: i => m.st[i] || NONE, endRound, turn: setTurn, beep: n => { Sound.play(n); Juice.hit(n); }, now: () => m.tick * TICK * 1000
     };
     m.game = def.create(api);
     view = 'game'; $('#hub').hidden = true; $('#stage').hidden = false;
@@ -1012,6 +1044,7 @@ const App = (() => {
     $('#pause').hidden = m.online; $('#waiting').hidden = true;
     $('#quit').textContent = m.online ? 'Leave match' : 'Back to shelf';
     const usesTouch = m.online ? m.dev === 'touch' : players.some(p => p.device === 'touch');
+    { const nt = m.online ? 1 : players.filter(p => p.device === 'touch').length; if (nt > 1) setTimeout(() => toast(m.def.kind === 'turns' ? 'Pass the screen between turns' : `${nt} players on one screen: P1 plays on the left, ${nt === 2 ? 'P2 on the right' : 'then each next player to the right'}`), 400); }
     curTouch = usesTouch; syncTouchUI();
     if (usesTouch && touchMode === 'screen') toast(m.game.drag ? 'Drag with your finger or mouse' : m.game.pointer ? 'Click or tap what you want' : m.game.tapA ? 'Click or tap to play' : 'Drag on the left to move, press on the right for action');
     const lg = id => id !== 'touch' ? legend(id) : (m.game.touch || (m.game.drag ? 'Move the mouse or drag a finger to control it. Click or press to act.' : m.game.pointer ? 'Click or tap what you want.' : m.game.tapA ? 'Click or tap to play.' : 'Drag on the left side to move, press on the right side to act.'));
@@ -1060,7 +1093,7 @@ const App = (() => {
   }
   function quit() {
     fx.length = 0; cv.style.transform = ''; hideOverlay(); match = null; view = 'hub';
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
+    if (isFs()) setFs(false);
     $('#stage').hidden = true; $('#hub').hidden = false; $('#touchpad').hidden = true; $('#waiting').hidden = true;
     Object.keys(Touch).forEach(k => { Touch[k] = typeof Touch[k] === 'number' ? 0 : false; }); vp.clear(); fingers.clear(); mouse.down = false;
     syncSeats(); renderOnline(); markSel(true);
@@ -1136,7 +1169,7 @@ const App = (() => {
           }
         }
         u.a = !!u.a || (g.dragFire ? (!!prev.pdn && !u.pdn) : (u.ph && u.pdn));
-      } else if (g.tapA) u.a = u.ph ? u.pdn : u.a;
+      } else if (g.tapA) u.a = !!u.a || (u.ph && !!u.pdn);
     }
     const s = derive(prev, u); m.pd[i] = s; m.st[i] = s;
   }
@@ -1173,21 +1206,21 @@ const App = (() => {
     while (m.acc >= TICK && n < 6 && match === m && m.state !== 'paused') {
       m.acc -= TICK; n++;
       const cache = {}, snap = ptrSnap();
-      m.players.forEach((p, i) => { if (p.device === 'cpu') { let r = null; if (m.state === 'play' && m.game.ai) { try { r = m.game.ai(i, TICK); } catch (e) { console.error(e); } } const q = r || {}; setSt(m, i, packRaw({ x: q.x || 0, y: q.y || 0, a: !!q.a, b: !!q.b }, q.ptr ? packPtr(q.ptr) : 0)); return; } if (cache[p.device] === undefined) cache[p.device] = Input.sample(p.device); setSt(m, i, packRaw(cache[p.device], p.device === 'touch' ? packPtr(ptrFor(m, snap, i)) : 0)); });
+      m.players.forEach((p, i) => { if (p.device === 'cpu') { let r = null; if (m.state === 'play' && m.game.ai) { try { r = m.game.ai(i, TICK); } catch (e) { console.error(e); } } const q = r || {}; setSt(m, i, packRaw({ x: q.x || 0, y: q.y || 0, a: !!q.a, b: !!q.b }, q.ptr ? packPtr(q.ptr) : 0)); return; } const tk = p.device === 'touch' ? touchSeats(m).indexOf(i) : 0, ck = p.device === 'touch' ? 'touch' + tk : p.device; if (cache[ck] === undefined) cache[ck] = (p.device === 'touch' && tk > 0) ? touchSample(tk) : Input.sample(p.device); setSt(m, i, packRaw(cache[ck], p.device === 'touch' ? packPtr(ptrFor(m, snap, i)) : 0)); });
       tickCore(m);
     }
   }
   function onlineAdvance(m, dt) {
     if (m.state === 'desync') return;
     m.acc = Math.min(m.acc + dt, TICK * 4);
-    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(Input.sample(m.dev), m.dev === 'touch' ? packPtr(ptrFor(m, ptrSnap(), m.li)) : 0)); }
+    while (m.acc >= TICK && Net.produced() < m.tick + D_TICKS + LEAD) { m.acc -= TICK; Net.pushFrame(packRaw(Input.sample(m.dev), m.dev === 'touch' && m.li >= 0 ? packPtr(ptrFor(m, ptrSnap(), m.li)) : 0)); }
     if (m.acc >= TICK) m.acc = TICK;
     let k = 0, ran = false;
     while (k < 10 && match === m && m.state !== 'desync') {
-      const mine = Net.myFrame(m.tick), theirs = Net.remoteFrame(m.tick);
-      if (mine === undefined || theirs === undefined) break;
-      setSt(m, m.li, mine); setSt(m, 1 - m.li, theirs);
-      for (let i = 2; i < m.players.length; i++) { let r = null; if (m.state === 'play' && m.game.ai) { try { r = m.game.ai(i, TICK); } catch (e) { console.error(e); } } const q = r || {}; setSt(m, i, packRaw({ x: q.x || 0, y: q.y || 0, a: !!q.a, b: !!q.b }, q.ptr ? packPtr(q.ptr) : 0)); }
+      const fr = Net.frames(m.tick, m.humans);
+      if (fr === undefined) break;
+      for (let i = 0; i < m.nh; i++) setSt(m, i, fr[i]);
+      for (let i = m.nh; i < m.players.length; i++) { let r = null; if (m.state === 'play' && m.game.ai) { try { r = m.game.ai(i, TICK); } catch (e) { console.error(e); } } const q = r || {}; setSt(m, i, packRaw({ x: q.x || 0, y: q.y || 0, a: !!q.a, b: !!q.b }, q.ptr ? packPtr(q.ptr) : 0)); }
       tickCore(m); k++; ran = true;
     }
     if (ran) m.stall = 0; else m.stall += dt;
@@ -1211,7 +1244,11 @@ const App = (() => {
     if (match !== m) return;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = SCR.bg; g.fillRect(0, 0, W, H);
+    Juice.sh = Math.max(0, Juice.sh - dt * 40); Juice.fl = Math.max(0, Juice.fl - dt);
+    g.save(); if (Juice.sh > .3) g.translate((Math.random() - .5) * Juice.sh, (Math.random() - .5) * Juice.sh);
     try { m.game.draw(g); } catch (e) { console.error(e); }
+    if (Juice.fl > 0) { g.fillStyle = 'rgba(255,255,255,' + Juice.fl * .6 + ')'; g.fillRect(0, 0, W, H); }
+    g.restore();
     fxDraw(dt);
   }
   function hubTick() {
@@ -1257,7 +1294,7 @@ const App = (() => {
      anything else falls back to a floating stick on the left half, A on the right half. */
   let touchMode = store.get('touchMode', 'screen'), curTouch = false;
   const mouse = { x: 0, y: 0, in: false, down: false, latch: false, t: 0 }, fingers = new Map();
-  const touchSeats = m => m.online ? [m.li] : m.players.map((p, i) => p.device === 'touch' ? i : -1).filter(i => i >= 0);
+  const touchSeats = m => m.online ? [Math.max(0, m.li)] : m.players.map((p, i) => p.device === 'touch' ? i : -1).filter(i => i >= 0);
   function ptrSnap() {
     const out = [];
     if (mouse.in || mouse.down) out.push({ x: mouse.x, y: mouse.y, down: mouse.down || mouse.latch, t: mouse.t });
@@ -1272,14 +1309,32 @@ const App = (() => {
     let best = null; for (const p of c) if (!best || p.t > best.t) best = p;
     return best;
   }
+  const touchSample = k => { const T = TouchK[k] || TouchK[0], o = { x: T.ax || 0, y: T.ay || 0, a: !!(T.a || T.la), b: !!(T.b || T.lb) }; T.la = T.lb = false; return o; };
   const vp = new Map();
   const plain = () => { const g2 = match && match.game; return g2 && !g2.drag && !g2.pointer && !g2.tapA && !g2.pointerRaw; };
+  /* full screen: the real API where the browser has it (Android, desktop), otherwise an immersive page that fills the screen (iPhone) */
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  const isFs = () => !!fsEl() || document.body.classList.contains('immersive');
+  function paintFs() { const b = $('#fs'); if (b) b.textContent = isFs() ? 'Exit full screen' : 'Full screen'; }
+  function setFs(on, byUser) {
+    const w = $('#stagewrap'), body = document.body;
+    if (!on) {
+      body.classList.remove('immersive');
+      try { if (document.exitFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => { }); else if (document.webkitExitFullscreen && document.webkitFullscreenElement) document.webkitExitFullscreen(); } catch (e) { }
+      try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) { }
+      paintFs(); return;
+    }
+    const req = w.requestFullscreen || w.webkitRequestFullscreen, lock = () => { try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => { }); } catch (e) { } };
+    const fallback = () => { body.classList.add('immersive'); window.scrollTo(0, 1); lock(); paintFs(); if (byUser && /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) toast('For true full screen on iPhone: Share, then Add to Home Screen'); };
+    if (!req) { fallback(); return; }
+    try { const p = req.call(w); if (p && p.then) p.then(() => { lock(); paintFs(); }).catch(fallback); else { lock(); paintFs(); } } catch (e) { fallback(); }
+  }
   const syncTouchUI = () => { $('#touchpad').hidden = !curTouch || touchMode !== 'buttons'; const t = $('#tmode'); t.hidden = !curTouch; t.textContent = touchMode === 'screen' ? 'Pointer controls' : 'Buttons on'; };
   const virtOn = () => curTouch && touchMode === 'screen' && match;
   function stickTo(v, e) {
     const R = Math.max(36, cv.getBoundingClientRect().width * .06); let dx = (e.clientX - v.sx) / R, dy = (e.clientY - v.sy) / R; const m = Math.hypot(dx, dy);
     if (m > 1) { dx /= m; dy /= m; v.sx += (m - 1) * R * dx; v.sy += (m - 1) * R * dy; }
-    Touch.ax = m < .28 ? 0 : Math.round(dx * 10) / 10; Touch.ay = m < .28 ? 0 : Math.round(dy * 10) / 10;
+    const T = TouchK[v.k || 0]; T.ax = m < .28 ? 0 : Math.round(dx * 10) / 10; T.ay = m < .28 ? 0 : Math.round(dy * 10) / 10;
   }
   cv.addEventListener('pointerdown', e => {
     if (!virtOn()) return;
@@ -1289,10 +1344,13 @@ const App = (() => {
     else fingers.set(e.pointerId, { x, y, down: true, latch: true, ended: false, t: now });
     if (!plain() || match.state !== 'play') return;
     const r = cv.getBoundingClientRect(); let role;
+    const ns = Math.max(1, touchSeats(match).length), fx = (e.clientX - r.left) / r.width; let k = 0, onStick = fx < .5;
+    if (ns > 1) { k = Math.min(ns - 1, Math.max(0, Math.floor(fx * ns))); const u = fx * ns - k; onStick = k % 2 === 0 ? u < .6 : u > .4; }
+    const T = TouchK[k];
     if (e.pointerType === 'mouse' && e.button === 2) role = 'b';
-    else if (e.clientX - r.left < r.width / 2) { if ([...vp.values()].some(v => v.role === 'stick')) return; role = 'stick'; }
-    else { role = !Touch.a ? 'a' : 'b'; if (Touch[role]) return; Touch[role] = true; }
-    vp.set(e.pointerId, { role, sx: e.clientX, sy: e.clientY }); if (role === 'b') Touch.b = true;
+    else if (onStick) { if ([...vp.values()].some(v => v.role === 'stick' && (v.k || 0) === k)) return; role = 'stick'; }
+    else { role = !T.a ? 'a' : 'b'; if (T[role]) return; T[role] = true; if (k > 0) T['l' + role] = true; }
+    vp.set(e.pointerId, { role, k, sx: e.clientX, sy: e.clientY }); if (role === 'b') { T.b = true; if (k > 0) T.lb = true; }
   });
   cv.addEventListener('pointermove', e => {
     if (!virtOn()) return;
@@ -1306,7 +1364,7 @@ const App = (() => {
     if (e.pointerType === 'mouse') { if (e.type === 'pointerup' && e.button !== 0) { } else mouse.down = false; }
     else { const f = fingers.get(e.pointerId); if (f) { f.down = false; f.ended = true; } }
     const v = vp.get(e.pointerId); if (!v) return; vp.delete(e.pointerId);
-    if (v.role === 'stick') { Touch.ax = 0; Touch.ay = 0; } else Touch[v.role] = false;
+    const T = TouchK[v.k || 0]; if (v.role === 'stick') { T.ax = 0; T.ay = 0; } else T[v.role] = false;
   };
   cv.addEventListener('pointerup', vrel); cv.addEventListener('pointercancel', vrel);
   cv.addEventListener('contextmenu', e => e.preventDefault());
@@ -1337,11 +1395,11 @@ const App = (() => {
   Net.hooks.msg = (msg, n) => {
     if (!msg || typeof msg !== 'object') return;
     const info = Net.info();
-    if (msg.k === 'start' && !info.host && Array.isArray(msg.names)) launchOnline(msg, n, 1);
+    if (msg.k === 'start' && !info.host && Array.isArray(msg.names)) launchOnline(msg, n);
     else if (msg.k === 'req' && info.host && match && match.online && match.done >= 0) hostStart(match.def.id, match.bestOf);
-    else if (msg.k === 'leave' && match && match.online) { toast('Your friend left the match'); quit(); }
+    else if (msg.k === 'leave' && match && match.online) { toast('A player left the match'); quit(); }
   };
-  Net.hooks.peerLeft = () => { if (match && match.online) { toast('Your friend disconnected'); quit(); } else if (ready) { toast('Your friend left the room'); renderOnline(); } };
+  Net.hooks.peerLeft = () => { if (match && match.online) { toast('A player disconnected'); quit(); } else if (ready) { toast('A player left the room'); renderOnline(); } };
   Net.hooks.desync = () => {
     const m = match; if (!m || !m.online || m.state === 'desync') return;
     m.state = 'desync'; $('#waiting').hidden = true;
@@ -1390,12 +1448,8 @@ const App = (() => {
       if (typeof setInterval === 'function') setInterval(() => { if (!on) return; fi = (fi + 1) % 3; { const t = $('#toon'); t.style.setProperty('--s1', (Math.random() * 100) + '%'); t.style.setProperty('--s2', (Math.random() * 100) + '%'); t.style.setProperty('--sf', Math.random() < .45 ? '1' : '0'); t.style.opacity = on ? (.5 + Math.random() * .2) : 0; } $('#cv').style.filter = 'url(#hd' + fi + ') saturate(1.12) contrast(1.04) sepia(.12)'; }, 130);
       $('#sketch').onclick = () => { on = !on; if (!on) $('#cv').style.filter = ''; try { localStorage.setItem('cc_sketch', on ? '1' : '0'); } catch (e) { } apply(); };
     }
-    $('#fs').onclick = () => {
-      const w = $('#stagewrap');
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
-      else if (w.requestFullscreen) w.requestFullscreen().catch(() => toast('Fullscreen is not available here'));
-      else toast('Fullscreen is not available here');
-    };
+    $('#fs').onclick = () => { if (isFs()) setFs(false); else setFs(true, true); };
+    document.addEventListener('fullscreenchange', paintFs); document.addEventListener('webkitfullscreenchange', paintFs);
     const tp = $('#touchpad');
     $('#tmode').onclick = () => { touchMode = touchMode === 'screen' ? 'buttons' : 'screen'; store.set('touchMode', touchMode); vp.clear(); fingers.clear(); mouse.down = false; Touch.ax = Touch.ay = 0; Touch.a = Touch.b = false; syncTouchUI(); toast(touchMode === 'screen' ? 'Touch the screen to play' : 'On-screen buttons on'); };
     tp.addEventListener('pointerdown', e => {
@@ -2235,61 +2289,64 @@ const Cast = (() => {
 /* ---------- Tic-Tac-Toe ---------- */
 registerGame({
   id: 'ttt', cpu: true, title: 'Tic-Tac-Toe', blurb: 'Three in a row. Pass the controller between moves.',
-  kind: 'turns', min: 2, max: 2, color: 0,
-  help: 'Move the cursor, press A to place a mark. Mouse and touch work too.',
+  kind: 'turns', min: 2, max: 4, color: 0,
+  help: 'Three players play on 5 by 5 and four on 7 by 7, and everyone needs four in a row. Move the cursor, press A to place a mark. Mouse and touch work too.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round"><path d="M80 14v96M120 14v96M46 46h108M46 78h108"/><path d="M54 20l18 18M72 20L54 38"/><circle cx="100" cy="62" r="9"/><path d="M128 84l18 18M146 84l-18 18"/></svg>`;
   },
   create(api) {
-    const B = 420, X0 = (W - B) / 2, Y0 = 128, C = B / 3, col = i => api.players[i].color;
-    const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]];
+    const n = api.n, NG = n > 3 ? 7 : n > 2 ? 5 : 3, K = n > 2 ? 4 : 3, B = n > 2 ? 440 : 420, X0 = (W - B) / 2, Y0 = n > 2 ? 110 : 128, C = B / NG, col = i => api.players[i].color, NC = NG * NG, MS = C * .27;
+    const LINES = []; for (let y = 0; y < NG; y++) for (let x = 0; x < NG; x++) for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) { const ex = x + dx * (K - 1), ey = y + dy * (K - 1); if (ex < 0 || ex >= NG || ey < 0 || ey >= NG) continue; LINES.push(Array.from({ length: K }, (_, k) => (y + dy * k) * NG + x + dx * k)); }
     let b, turn, cx, cy, over, win, endT;
-    const cellAt = (x, y) => (x < X0 || y < Y0 || x > X0 + B || y > Y0 + B) ? -1 : Math.floor((y - Y0) / C) * 3 + Math.floor((x - X0) / C);
+    const cellAt = (x, y) => (x < X0 || y < Y0 || x > X0 + B || y > Y0 + B) ? -1 : Math.floor((y - Y0) / C) * NG + Math.floor((x - X0) / C);
     function place(i) {
       if (over || b[i] !== -1) return;
       b[i] = turn; api.beep('place');
       const L = LINES.find(L => L.every(k => b[k] === turn));
       if (L) { win = L; over = true; endT = 1.1; api.beep('win'); return; }
       if (b.every(v => v !== -1)) { win = null; over = true; endT = 1; return; }
-      turn = 1 - turn; api.turn(turn);
+      turn = (turn + 1) % n; api.turn(turn);
     }
     return {
       ai(i, dt) { const Z_ = (this.zz || (this.zz = {}))[i] || (this.zz[i] = {});
         if (over || turn !== i) { Z_.t = 0; return null; }
         Z_.t = (Z_.t || 0) + dt; if (Z_.t < .6) return null; Z_.t = 0;
-        const L = api.cpu, empty = []; for (let k = 0; k < 9; k++) if (b[k] === -1) empty.push(k);
+        const L = api.cpu, empty = []; for (let k = 0; k < NC; k++) if (b[k] === -1) empty.push(k);
         const winner = bb => { for (const l of LINES) if (bb[l[0]] !== -1 && bb[l[0]] === bb[l[1]] && bb[l[1]] === bb[l[2]]) return bb[l[0]]; return -1; };
         const mm = (bb, p) => { const w = winner(bb); if (w === i) return 1; if (w === 1 - i) return -1; let any = false, best = p === i ? -2 : 2; for (let k = 0; k < 9; k++) if (bb[k] === -1) { any = true; bb[k] = p; const v = mm(bb, 1 - p); bb[k] = -1; best = p === i ? Math.max(best, v) : Math.min(best, v); } return any ? best : 0; };
         let mv; if (rand() < [.55, .12, 0][L]) mv = empty[irand(0, empty.length - 1)];
+        else if (n > 2) { const blk = rand() < [.1, .5, .7][L]; let bs = -1, c2 = []; for (const k of empty) { let v = rand(0, .5); for (const l of LINES) { if (!l.includes(k)) continue; const cnt = {}; for (const q of l) if (b[q] !== -1) cnt[b[q]] = (cnt[b[q]] || 0) + 1; const mine = cnt[i] || 0, rv = Math.max(0, ...Object.keys(cnt).filter(x => +x !== i).map(x => cnt[x])), mixed = Object.keys(cnt).length > 1; if (mine === K - 1) v += 1000; else if (rv === K - 1 && !cnt[i]) v += (blk ? 500 : 0); else if (!mixed) { v += mine ? Math.pow(5, mine) : 0; if (rv && L) v += Math.pow(3, rv); } } if (v > bs) { bs = v; c2 = [k]; } else if (v === bs) c2.push(k); } mv = c2[irand(0, c2.length - 1)]; }
         else { let bs = -9; const cands = []; for (const k of empty) { b[k] = i; const v = mm(b, 1 - i); b[k] = -1; if (v > bs) { bs = v; cands.length = 0; } if (v === bs) cands.push(k); } mv = cands[irand(0, cands.length - 1)]; }
         place(mv); return null;
       },
-      reset(r) { b = Array(9).fill(-1); turn = r % 2; cx = 1; cy = 1; over = false; win = null; endT = 0; api.turn(turn); },
+      reset(r) { b = Array(NC).fill(-1); turn = r % n; cx = NG >> 1; cy = NG >> 1; over = false; win = null; endT = 0; api.turn(turn); },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(win ? b[win[0]] : -1, win ? 'Three in a row.' : 'The board is full.'); return; }
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(win ? b[win[0]] : -1, win ? ['Three', 'Four'][K - 3] + ' in a row.' : 'The board is full.'); return; }
         const s = api.input(turn);
-        if (s.pl) cx = (cx + 2) % 3; if (s.pr) cx = (cx + 1) % 3;
-        if (s.pu) cy = (cy + 2) % 3; if (s.pd) cy = (cy + 1) % 3;
-        if (s.pa) place(cy * 3 + cx);
+        if (s.pl) cx = (cx + NG - 1) % NG; if (s.pr) cx = (cx + 1) % NG;
+        if (s.pu) cy = (cy + NG - 1) % NG; if (s.pd) cy = (cy + 1) % NG;
+        if (s.pa) place(cy * NG + cx);
       },
-      pointer(x, y, t) { const i = cellAt(x, y); if (i < 0) return; cx = i % 3; cy = Math.floor(i / 3); if (t === 'down') place(i); },
+      pointer(x, y, t) { const i = cellAt(x, y); if (i < 0) return; cx = i % NG; cy = Math.floor(i / NG); if (t === 'down') place(i); },
       draw(g) {
         const head = over ? (win ? api.players[b[win[0]]].name + ' wins' : 'Draw') : api.players[turn].name + "'s turn";
-        D.text(g, head, W / 2, 62, 42, over ? SCR.fg : col(turn));
+        D.text(g, head, W / 2, n > 2 ? 54 : 62, n > 2 ? 36 : 42, over ? SCR.fg : col(turn));
         g.lineCap = 'round'; g.strokeStyle = SCR.soft; g.lineWidth = 8; g.beginPath();
-        for (let i = 1; i < 3; i++) { g.moveTo(X0 + i * C, Y0 + 10); g.lineTo(X0 + i * C, Y0 + B - 10); g.moveTo(X0 + 10, Y0 + i * C); g.lineTo(X0 + B - 10, Y0 + i * C); }
+        for (let i = 1; i < NG; i++) { g.moveTo(X0 + i * C, Y0 + 10); g.lineTo(X0 + i * C, Y0 + B - 10); g.moveTo(X0 + 10, Y0 + i * C); g.lineTo(X0 + B - 10, Y0 + i * C); }
         g.stroke();
-        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([10, 8]); D.rr(g, X0 + cx * C + 12, Y0 + cy * C + 12, C - 24, C - 24, 14); g.stroke(); g.setLineDash([]); }
-        for (let i = 0; i < 9; i++) {
+        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([10, 8]); D.rr(g, X0 + cx * C + C * .14, Y0 + cy * C + C * .14, C * .72, C * .72, 12); g.stroke(); g.setLineDash([]); }
+        for (let i = 0; i < NC; i++) {
           if (b[i] < 0) continue;
-          const x = X0 + (i % 3) * C + C / 2, y = Y0 + Math.floor(i / 3) * C + C / 2;
-          g.strokeStyle = col(b[i]); g.lineWidth = 12; g.beginPath();
-          if (b[i] === 0) { const d = 34; g.moveTo(x - d, y - d); g.lineTo(x + d, y + d); g.moveTo(x + d, y - d); g.lineTo(x - d, y + d); } else g.arc(x, y, 36, 0, TAU);
-          g.stroke();
+          const x = X0 + (i % NG) * C + C / 2, y = Y0 + Math.floor(i / NG) * C + C / 2;
+          g.fillStyle = g.strokeStyle = col(b[i]); g.lineWidth = Math.max(6, C * .1); g.beginPath();
+          if (b[i] === 0) { const d = MS; g.moveTo(x - d, y - d); g.lineTo(x + d, y + d); g.moveTo(x + d, y - d); g.lineTo(x - d, y + d); g.stroke(); }
+          else if (b[i] === 1) { g.arc(x, y, MS * 1.05, 0, TAU); g.stroke(); }
+          else if (b[i] === 2) { g.moveTo(x, y - MS * 1.2); g.lineTo(x + MS * 1.1, y + MS * .9); g.lineTo(x - MS * 1.1, y + MS * .9); g.closePath(); g.fill(); }
+          else { D.rr(g, x - MS * .95, y - MS * .95, MS * 1.9, MS * 1.9, 5); g.fill(); }
         }
         if (win) {
-          const a = win[0], c = win[2]; g.strokeStyle = SCR.fg; g.lineWidth = 6; g.globalAlpha = .9; g.beginPath();
-          g.moveTo(X0 + (a % 3) * C + C / 2, Y0 + Math.floor(a / 3) * C + C / 2); g.lineTo(X0 + (c % 3) * C + C / 2, Y0 + Math.floor(c / 3) * C + C / 2); g.stroke(); g.globalAlpha = 1;
+          const a = win[0], c = win[K - 1]; g.strokeStyle = SCR.fg; g.lineWidth = 6; g.globalAlpha = .9; g.beginPath();
+          g.moveTo(X0 + (a % NG) * C + C / 2, Y0 + Math.floor(a / NG) * C + C / 2); g.lineTo(X0 + (c % NG) * C + C / 2, Y0 + Math.floor(c / NG) * C + C / 2); g.stroke(); g.globalAlpha = 1;
         }
       }
     };
@@ -2542,72 +2599,440 @@ registerGame({
    GAME LIBRARY: simultaneous (everyone plays at once)
    ===================================================================== */
 
-/* ---------- Pong ---------- */
-registerGame({
-  id: 'pong', cpu: true, title: 'Pong', blurb: 'The original duel. First to five, and the ball keeps speeding up.',
-  kind: 'live', min: 2, max: 4, color: 1,
-  help: 'Up and down move your paddle. Hit the ball off the edge of the paddle to change its angle. With 3 or 4 players it becomes doubles: players 1 and 3 against 2 and 4.',
-  icon() {
-    return `<svg viewBox="0 0 200 125" fill="#0F1923" stroke="none"><rect x="26" y="30" width="11" height="50" rx="4"/><rect x="163" y="52" width="11" height="50" rx="4"/><circle cx="104" cy="58" r="9"/><g opacity=".5"><rect x="98" y="8" width="5" height="12" rx="2"/><rect x="98" y="30" width="5" height="12" rx="2"/><rect x="98" y="76" width="5" height="12" rx="2"/><rect x="98" y="98" width="5" height="12" rx="2"/></g></svg>`;
-  },
-  create(api) {
-    const PW = 14, PH = 110, PS = 560, GOAL = 5, PX = [34, W - 34, 78, W - 78], N = () => api.players.length, tm = i => i % 2, col = i => api.players[i].color;
-    let py, ball, score, serveT, flash, trail, over;
-    function serve(dir) { ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 9, sp: 380, dir }; serveT = .9; trail = []; }
-    function point(w) {
-      api.beep('die');
-      if (score[w] >= GOAL) { over = true; api.endRound(w, `${score[0]} to ${score[1]}.`); return; }
-      serve(w === 0 ? 1 : -1);
+/* ---------- Ping Pong and Pickleball (shared top-down racket engine) ---------- */
+function racketGame(api, K) {
+  const n = api.n, TX0 = 160, TX1 = 800, TY0 = 165, TY1 = 495, NET = 480, NETH = K.netH, G = K.g, E = K.e, FR = K.fr, GOAL = 11, PR = K.pr, BR = K.br, KIT = K.kit;
+  const tm = i => i % 2, dirOf = t => t === 0 ? 1 : -1, col = i => api.players[i].color, tcol = t => api.players[t].color;
+  const lane = i => n <= 2 ? [70, 570] : (Math.floor(i / 2) === 0 ? [70, 340] : [270, 570]);
+  const xr = i => tm(i) === 0 ? [34, NET - 22] : [NET + 22, W - 34];
+  const hyp = Math.hypot;
+  let pd, ball, sc, srv, first, srvSeat, ph, pt, last, need, over, endT, winner, msg, msgT, flash, trail, hits, tot, hitter;
+  const home = i => { const l = lane(i), t = tm(i); return { x: t === 0 ? 170 : W - 170, y: (l[0] + l[1]) / 2 }; };
+  const inT = (x, y) => x > TX0 && x < TX1 && y > TY0 && y < TY1;
+  function whoServes() {
+    const k = tot, d = sc[0] >= 10 && sc[1] >= 10;
+    if (K.sideout) return srv;
+    return d ? (first + (k - 20)) % 2 === 0 ? first : 1 - first : (first + Math.floor(k / 2)) % 2;
+  }
+  function newServe() {
+    ph = 'serve'; pt = .8; last = -1; need = []; hits = 0; hitter = -1;
+    srv = whoServes();
+    const seats = seatsOf(n).filter(i => tm(i) === srv); srvSeat = seats[Math.floor(tot / (K.sideout ? 1 : 2)) % seats.length];
+    pd = seatsOf(n).map(i => { const h = home(i); return { x: h.x, y: h.y, vx: 0, vy: 0, sw: 0, cd: 0, fl: 0, mvx: 0, mvy: 0 }; });
+    const p = pd[srvSeat]; ball = { x: p.x + dirOf(srv) * 40, y: p.y, z: 34, vx: 0, vy: 0, vz: 0, held: true }; trail = [];
+  }
+  function point(w, why) {
+    msg = why; msgT = 1.1; ph = 'res'; pt = 1.1;
+    if (K.sideout) { if (w === srv) { sc[w]++; tot++; msg = why + ' point'; } else { srv = w; msg = 'Side out'; } }
+    else { sc[w]++; tot++; }
+    api.beep('place');
+    if (sc[w] >= GOAL && sc[w] - sc[1 - w] >= 2) { over = true; endT = 1.1; winner = w; api.beep('win'); }
+  }
+  const fault = (loser, why) => point(1 - loser, why);
+  /* simulate one flight with the real physics; used for the serve and for the computer's read of the ball */
+  function sim(b, t, serveCheck) {
+    const s = { x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz }, bn = []; let crossed = false;
+    for (let k = 0; k < 400; k++) {
+      const px = s.x; s.vz -= G * .008; s.x += s.vx * .008; s.y += s.vy * .008; s.z += s.vz * .008;
+      if ((px - NET) * (s.x - NET) < 0) { if (s.z < NETH) return { net: true, bn }; crossed = true; }
+      if (s.z <= 0) { s.z = 0; if (!inT(s.x, s.y)) return { out: true, bn, x: s.x }; bn.push({ x: s.x, y: s.y, k }); s.vz = -s.vz * E; s.vx *= FR; s.vy *= FR; if (bn.length >= 3) return { bn }; }
     }
-    function step(h) {
-      if (over) return;
-      ball.x += ball.vx * h; ball.y += ball.vy * h;
-      if (ball.y < ball.r + 10) { ball.y = ball.r + 10; ball.vy = Math.abs(ball.vy); api.beep('wall'); }
-      if (ball.y > H - ball.r - 10) { ball.y = H - ball.r - 10; ball.vy = -Math.abs(ball.vy); api.beep('wall'); }
-      for (let i = 0; i < N(); i++) {
-        const out = tm(i) ? -1 : 1;
-        if (ball.vx * out < 0 && Math.abs(ball.x - PX[i]) <= PW / 2 + ball.r && Math.abs(ball.y - py[i]) <= PH / 2 + ball.r) {
-          const off = clamp((ball.y - py[i]) / (PH / 2), -1, 1), ang = off * .9;
-          ball.sp = Math.min(1100, ball.sp * 1.07); ball.vx = Math.cos(ang) * ball.sp * out; ball.vy = Math.sin(ang) * ball.sp;
-          ball.x = PX[i] + out * (PW / 2 + ball.r + .5); flash[i] = .15; api.beep('hit');
+    return { bn };
+  }
+  function strike(i, off) {
+    const p = pd[i], t = tm(i), d = dirOf(t), fwd = Math.max(0, p.vx * d), pw = clamp(fwd / 1700, 0, 1), vol = need.length > 0;
+    let T, vx, vy, vz;
+    if (ph === 'serve' && K.ownBounce) {
+      const cands = [];
+      for (let sp = 160; sp <= 700; sp += 30) for (let up = -100; up <= 500; up += 40) {
+        const tryB = { x: ball.x, y: ball.y, z: ball.z, vx: d * sp, vy: 0, vz: up }, r = sim(tryB, t);
+        if (r.net || r.out || r.bn.length < 2) continue;
+        const b1 = r.bn[0], b2 = r.bn[1], s1 = b1.x < NET ? 0 : 1, s2 = b2.x < NET ? 0 : 1;
+        if (s1 === t && s2 === 1 - t && Math.abs(b2.x - NET) > 70 && Math.abs(b2.x - NET) < 250) cands.push([sp, up]);
+      }
+      const c = cands.length ? cands[irand(0, cands.length - 1)] : [330, 120]; vx = d * c[0]; vz = c[1]; vy = clamp((ball.y - p.y) * 0 + rand(-60, 60), -90, 90);
+      need = [t, 1 - t];
+    } else {
+      const serving = ph === 'serve';
+      const lo = serving && KIT ? KIT + 50 : 40, depth = serving ? (KIT ? KIT + 55 + 90 * rand() : 150) : (K.dink && pw < .18 ? 45 + 90 * pw / .18 : 60 + 210 * pw), err = (22 + 80 * off * off + 60 * pw * pw) * rand(-1, 1);
+      const landX = NET + d * clamp(depth + err, lo, 270); T = clamp((landX - ball.x) * d / (K.base + K.spd * pw), K.tmin, 1.3);
+      vx = (landX - ball.x) / T; vz = (.5 * G * T * T - ball.z) / T;
+      let vyy = p.vy * .45 + (ball.y - p.y) * 5.5 + rand(-1, 1) * 24 * (.4 + off);
+      const lo2 = (TY0 + 28 - ball.y) / T, hi2 = (TY1 - 28 - ball.y) / T; vy = off < .62 ? clamp(vyy, lo2, hi2) : clamp(vyy, -420, 420);
+      need = [1 - t];
+    }
+    ball.vx = vx; ball.vy = vy; ball.vz = vz; ball.held = false; last = t; hitter = i; p.fl = .18; flash = .08; hits++;
+    api.beep(pw > .55 ? 'shot' : 'hit'); ph = 'rally';
+  }
+  function bounce(side) {
+    api.beep('wall');
+    if (KIT && hits === 1 && Math.abs(ball.x - NET) < KIT && need[0] === side) { fault(last, 'Kitchen serve'); return; }
+    if (need.length && need[0] !== side) { fault(last, 'Short'); return; }
+    if (need.length) { need.shift(); return; }
+    point(last, 'Winner');
+  }
+  return {
+    dragAxes: 'xy', drag: i => pd && pd[i] ? { x: pd[i].x, y: pd[i].y } : null,
+    ai(i, dt) {
+      if (!pd || over) return null; const Z = this.zs || (this.zs = []), z = Z[i] || (Z[i] = { x: pd[i].x, y: pd[i].y, sw: 0, ex: 0, ey: 0, rt: 0, go: 0 }), L = api.cpu;
+      const t = tm(i), d = dirOf(t), h = home(i), l = lane(i), xs = xr(i), CS = [560, 860, 1200][L] * dt;
+      if (hyp(z.x - pd[i].x, z.y - pd[i].y) > 260) { z.x = pd[i].x; z.y = pd[i].y; }
+      let tx = h.x, ty = h.y, mv = CS * .6;
+      if (ph === 'serve') { if (i === srvSeat && pt <= 0 && z.sw <= 0) z.sw = .22; }
+      else if (ph === 'rally' && !ball.held && last !== t) {
+        const r0 = { x: ball.x, y: ball.y, z: ball.z, vx: ball.vx, vy: ball.vy, vz: ball.vz };
+        const mates = seatsOf(n).filter(k => tm(k) === t);
+        let tgt = null, tt = 0; const s = r0, bn = need.length; let b2 = bn;
+        for (let k = 0; k < 300; k++) {
+          const px = s.x; s.vz -= G * .008; s.x += s.vx * .008; s.y += s.vy * .008; s.z += s.vz * .008; tt += .008;
+          if ((px - NET) * (s.x - NET) < 0 && s.z < NETH) break;
+          if (s.z <= 0) { s.z = 0; if (!inT(s.x, s.y)) break; s.vz = -s.vz * E; s.vx *= FR; s.vy *= FR; if ((s.x - NET) * d < 0) b2 = 0; }
+          if ((NET - s.x) * d > 20 && s.z < 80 && (b2 === 0 || (K.vol && hits >= 3 && (NET - s.x) * d > KIT + 30)) && s.x >= xs[0] - 10 && s.x <= xs[1] + 10) { tgt = { x: s.x, y: s.y, t: tt }; break; }
+        }
+        if (tgt) {
+          let me = true; for (const k of mates) if (k !== i) { const q = pd[k]; if (hyp(q.x - tgt.x, q.y - tgt.y) < hyp(pd[i].x - tgt.x, pd[i].y - tgt.y) - 20) me = false; }
+          if (me) {
+            if (z.rt <= 0) { z.ex = rand(-1, 1) * [55, 24, 8][L]; z.ey = rand(-1, 1) * [55, 24, 8][L]; z.rt = 1; }
+            tx = tgt.x + z.ex - d * 58; ty = tgt.y + z.ey; mv = CS * 1.2;
+            if (tgt.t < [.22, .17, .14][L]) { tx = tgt.x + z.ex + d * [30, 45, 62][L]; mv = CS * 3; }
+          }
         }
       }
-      if (ball.x < -30) { score[1]++; point(1); } else if (ball.x > W + 30) { score[0]++; point(0); }
+      z.rt -= dt; if (z.sw > 0) { z.sw -= dt; tx = ball.x + d * 90; ty = ball.y; mv = CS * 3; }
+      if (K.vol && ph === 'rally' && last !== t && need.length) tx = d > 0 ? Math.min(tx, NET - KIT - 8) : Math.max(tx, NET + KIT + 8);
+      tx = clamp(tx, xs[0], xs[1]); ty = clamp(ty, l[0], l[1]);
+      const dx = tx - z.x, dy = ty - z.y, dd = hyp(dx, dy) || 1, st = Math.min(dd, mv); z.x += dx / dd * st; z.y += dy / dd * st;
+      return { ptr: { x: z.x, y: z.y, down: false } };
+    },
+    dbg() { return JSON.stringify({ ph, pt, hits, srvSeat, last, need, sc, msg, ball, p0: pd[0], p1: pd[1] }); },
+    reset(r) { sc = [0, 0]; tot = 0; first = r % 2; srv = first; over = false; endT = 0; winner = -1; msg = ''; msgT = 0; flash = 0; newServe(); },
+    update(dt) {
+      msgT -= dt; flash = Math.max(0, flash - dt);
+      for (let i = 0; i < n; i++) {
+        const p = pd[i], s = api.input(i), xs = xr(i), l = lane(i), ox = p.x, oy = p.y, d = dirOf(tm(i));
+        p.cd -= dt; p.fl -= dt; p.sw -= dt;
+        if (s.ph) { const tx = clamp(s.px, xs[0], xs[1]), ty = clamp(s.py, l[0], l[1]); let dx = (tx - p.x) * Math.min(1, dt * 20), dy = (ty - p.y) * Math.min(1, dt * 20); const m = hyp(dx, dy), cap = 3000 * dt; if (m > cap) { dx *= cap / m; dy *= cap / m; } p.x += dx; p.y += dy; }
+        else {
+          let ax = s.x * 2600, ay = s.y * 2600;
+          if (s.pa && p.cd <= 0) { p.cd = .35; p.sw = .14; api.beep('dash'); }
+          if (p.sw > 0) ax += d * 9000;
+          p.mvx = (p.mvx + ax * dt) * Math.exp(-7 * dt); p.mvy = (p.mvy + ay * dt) * Math.exp(-7 * dt);
+          const m = hyp(p.mvx, p.mvy), mx = p.sw > 0 ? 1900 : 520; if (m > mx) { p.mvx *= mx / m; p.mvy *= mx / m; }
+          p.x += p.mvx * dt; p.y += p.mvy * dt;
+        }
+        p.x = clamp(p.x, xs[0], xs[1]); p.y = clamp(p.y, l[0], l[1]);
+        p.vx += ((p.x - ox) / dt - p.vx) * .55; p.vy += ((p.y - oy) / dt - p.vy) * .55;
+      }
+      if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${sc[0]} to ${sc[1]}.`); return; }
+      if (ph === 'res') { pt -= dt; if (pt <= 0) newServe(); return; }
+      if (ph === 'serve') {
+        pt -= dt; const p = pd[srvSeat], d = dirOf(srv); ball.x = p.x + d * 40; ball.y = p.y; ball.z = 34;
+        if (pt <= 0) { const s = api.input(srvSeat), fwd = p.vx * d; if ((s.pa && !s.ph) || s.ppr || fwd > 420 || p.sw > 0 || pt < -2.2) strike(srvSeat, .3); }
+        return;
+      }
+      const px0 = ball.x; ball.vz -= G * dt; ball.x += ball.vx * dt; ball.y += ball.vy * dt; ball.z += ball.vz * dt;
+      trail.push({ x: ball.x, y: ball.y, z: ball.z, t: .22 }); trail.forEach(q => q.t -= dt); trail = trail.filter(q => q.t > 0);
+      if ((px0 - NET) * (ball.x - NET) < 0 && ball.z < NETH) { api.beep('no'); fault(last, 'Net'); return; }
+      if (ball.z <= 0) {
+        ball.z = 0;
+        if (inT(ball.x, ball.y)) { ball.vz = -ball.vz * E; ball.vx *= FR; ball.vy *= FR; bounce(ball.x < NET ? 0 : 1); if (ph !== 'rally') return; }
+        else { if (need.length) fault(last, 'Out'); else point(last, 'Winner'); return; }
+      }
+      if (ball.x < -60 || ball.x > W + 60 || ball.y < 0 || ball.y > H + 40) { if (need.length) fault(last, 'Out'); else point(last, 'Winner'); return; }
+      for (let i = 0; i < n; i++) {
+        const t = tm(i), p = pd[i]; if (last === t || ball.z > 95 || ball.z < -2) continue;
+        let volley = false;
+        if (need.length) { if (!(K.vol && hits >= 3 && need[0] === t && (ball.x - NET) * dirOf(t) < 0)) continue; volley = true; }
+        const dd = hyp(ball.x - p.x, ball.y - p.y);
+        if (dd < PR + BR) { if (volley && Math.abs(p.x - NET) < KIT) { fault(t, 'Kitchen volley'); return; } strike(i, clamp(dd / (PR + BR), 0, 1)); p.sw = 0; break; }
+      }
+    },
+    draw(g) {
+      const T = (x, y, w, h, c, r) => { g.fillStyle = c; D.rr(g, x, y, w, h, r || 0); g.fill(); };
+      g.fillStyle = K.bg1; g.fillRect(0, 0, W, H); g.fillStyle = K.bg2; for (let k = 0; k < 12; k++) g.fillRect(k * 80, 0, 40, H);
+      T(TX0 + 10, TY0 + 16, TX1 - TX0, TY1 - TY0, 'rgba(0,0,0,.35)', 14);
+      T(TX0 - 8, TY0 - 8, TX1 - TX0 + 16, TY1 - TY0 + 16, K.edge, 14); T(TX0, TY0, TX1 - TX0, TY1 - TY0, K.top, 8);
+      g.fillStyle = K.line;
+      if (KIT) { g.globalAlpha = .28; g.fillStyle = '#FFC933'; g.fillRect(NET - KIT, TY0, KIT * 2, TY1 - TY0); g.globalAlpha = 1; g.fillStyle = K.line; g.fillRect(NET - KIT - 2, TY0, 4, TY1 - TY0); g.fillRect(NET + KIT - 2, TY0, 4, TY1 - TY0); g.fillRect(TX0, (TY0 + TY1) / 2 - 2, NET - KIT - TX0, 4); g.fillRect(NET + KIT, (TY0 + TY1) / 2 - 2, TX1 - NET - KIT, 4); D.text(g, 'kitchen', NET, TY1 - 14, 13, K.line, 'center', 700); }
+      else { g.fillRect(TX0, (TY0 + TY1) / 2 - 2, TX1 - TX0, 4); }
+      g.fillStyle = 'rgba(0,0,0,.3)'; g.fillRect(NET - 1, TY0 - 14, 8, TY1 - TY0 + 28); g.fillStyle = '#D9DEE5'; g.fillRect(NET - 4, TY0 - 12, 8, TY1 - TY0 + 24);
+      g.fillStyle = 'rgba(255,255,255,.55)'; for (let y = TY0; y < TY1; y += 14) g.fillRect(NET - 4, y, 8, 7);
+      T(NET - 8, TY0 - 18, 16, 12, '#2C3946', 4); T(NET - 8, TY1 + 6, 16, 12, '#2C3946', 4);
+      for (let i = 0; i < n; i++) { const p = pd[i], t = tm(i), bx = t === 0 ? 62 : W - 62; puppet(g, api, i, bx, clamp(p.y + 60, 130, 580), .5, p.fl > 0 || p.sw > 0 ? 'attack' : 'hold', t === 0 ? 1 : -1, true); }
+      for (const q of trail) { g.globalAlpha = clamp(q.t * 2.2, 0, .5); D.disc(g, q.x, q.y - q.z * .6, BR * .7, '#fff'); } g.globalAlpha = 1;
+      for (let i = 0; i < n; i++) {
+        const p = pd[i], t = tm(i), d = dirOf(t), c = col(i);
+        g.save(); g.translate(p.x, p.y); g.rotate((d > 0 ? Math.PI : 0) + (p.vy * d * -.00028)); g.fillStyle = 'rgba(0,0,0,.28)'; g.beginPath(); g.ellipse(4, 12, PR, PR * .9, 0, 0, TAU); g.fill();
+        g.fillStyle = '#B07A45'; D.rr(g, -6, -7, PR + 26, 14, 6); g.fill();
+        const sw = clamp(hyp(p.vx, p.vy) / 1800, 0, 1); g.fillStyle = c; g.beginPath(); g.arc(0, 0, PR + (p.fl > 0 ? 4 : 0), 0, TAU); g.fill();
+        g.fillStyle = 'rgba(255,255,255,' + (.14 + sw * .3) + ')'; g.beginPath(); g.arc(-8, -8, PR * .5, 0, TAU); g.fill();
+        g.fillStyle = 'rgba(0,0,0,.18)'; g.beginPath(); g.arc(0, 0, PR * .62, 0, TAU); g.fill(); g.restore();
+      }
+      if (ball) { const b = ball, sx = b.x, sy = b.y - b.z * .6, r = BR * (1 + b.z / 420); g.fillStyle = 'rgba(0,0,0,' + clamp(.34 - b.z / 500, .08, .34) + ')'; g.beginPath(); g.ellipse(b.x, b.y + 2, BR * (1 - clamp(b.z / 500, 0, .4)), BR * .5, 0, 0, TAU); g.fill(); D.disc(g, sx, sy, r, K.ball); D.disc(g, sx - r * .3, sy - r * .3, r * .3, 'rgba(255,255,255,.8)'); }
+      if (flash > 0) { g.fillStyle = 'rgba(255,255,255,' + flash * 1.2 + ')'; g.fillRect(0, 0, W, H); }
+      [0, 1].forEach(t => { const x = t === 0 ? 150 : W - 150; D.text(g, seatsOf(n).filter(i => tm(i) === t).map(i => api.players[i].name).join(' + '), x, 40, 16, tcol(t), 'center', 800); D.text(g, sc[t], x, 100, 60, tcol(t)); if (srv === t && ph !== 'res') D.text(g, 'serving', x, 126, 14, SCR.dim, 'center', 600); });
+      D.text(g, 'first to ' + GOAL + ', win by 2', W / 2, 40, 16, SCR.dim, 'center', 600);
+      if (ph === 'serve' && !over) D.text(g, api.players[srvSeat].name + ': tap or flick forward to serve', W / 2, 590, 18, SCR.fg, 'center', 700);
+      if (hits >= 1 && hits < 3 && K.vol && ph === 'rally') D.text(g, 'let it bounce', W / 2, 590, 16, SCR.dim, 'center', 600);
+      if (msgT > 0 && msg) D.text(g, msg, W / 2, 96, 48, '#FFC933');
+      if (over) D.text(g, api.players[winner].name + (n > 2 ? ' team wins' : ' wins'), W / 2, 330, 56, tcol(winner));
+    }
+  };
+}
+registerGame({
+  id: 'pong', cpu: true, title: 'Ping Pong', blurb: 'Real table tennis from above. Serve, rally, first to 11 and win by two.',
+  kind: 'live', min: 2, max: 4, color: 1,
+  help: 'Hold the paddle and move it with your finger or mouse; it stays on your half. Serve with a tap or forward flick: the ball must bounce on your side, then on theirs. After that, let the ball bounce once on your side before you hit it, and never let it bounce twice. Swing through it: a quick flick hits hard and deep, a gentle touch drops it short. Clip the net, hit the ball out, or miss the table and the other side scores. Serves swap every two points. First to 11 wins, but you must be two ahead. On a keyboard use the stick and A to swing. Three or four players make doubles.',
+  touch: 'Put your finger down to hold the paddle, then flick it through the ball.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none"><rect x="14" y="22" width="172" height="82" rx="8" fill="#0F1923"/><rect x="97" y="22" width="6" height="82" fill="#fff"/><circle cx="52" cy="62" r="17" fill="#E8553B"/><rect x="66" y="58" width="22" height="8" rx="3" fill="#fff"/><circle cx="150" cy="48" r="8" fill="#fff"/></svg>`; },
+  create(api) { return racketGame(api, { netH: 22, g: 1500, e: .87, fr: .72, pr: 34, br: 9, kit: 0, ownBounce: true, sideout: false, vol: false, dink: false, base: 460, spd: 900, tmin: .44, bg1: '#16262F', bg2: '#1D3340', edge: '#F2F4F7', top: '#1F68B3', line: '#F2F4F7', ball: '#FFF5E1' }); }
+});
+/* ---------- Pickleball (official court, two-bounce rule, kitchen rule, side-out scoring) ---------- */
+/* Court geometry. 1 ft = 18 game units. The net runs top to bottom through the middle; each team plays one half. */
+const PB = (() => {
+  const FT = 18, NET = 480, HALF_L = 22 * FT, HALF_W = 10 * FT, KIT = 7 * FT, LINE = 2;
+  const C = { FT, NET, KIT, LINE, X0: NET - HALF_L, X1: NET + HALF_L, Y0: 300 - HALF_W, Y1: 300 + HALF_W, YM: 300 };
+  /* Net: 36 in at the posts, 34 in at the middle (a sagging cord), in height units. */
+  C.netHeight = y => (34 + 2 * Math.min(1, Math.abs(y - C.YM) / HALF_W)) / 12 * FT;
+  /* Where did a ball land? Lines are IN. The kitchen line counts as kitchen (a serve on it is a fault). */
+  C.classify = (x, y) => {
+    const inBounds = x >= C.X0 - LINE && x <= C.X1 + LINE && y >= C.Y0 - LINE && y <= C.Y1 + LINE, dx = Math.abs(x - NET);
+    const isInsideKitchen = inBounds && dx <= KIT + LINE, side = x < NET ? 0 : 1, half = y < C.YM ? 'top' : 'bottom';
+    return { isOutOfBounds: !inBounds, isInsideKitchen, onKitchenLine: inBounds && Math.abs(dx - KIT) <= LINE, side, half, serviceBox: inBounds && !isInsideKitchen ? side + half : null };
+  };
+  /* Which absolute half-court does a player on the RIGHT or LEFT of a team stand in? Team 0 faces east, team 1 faces west. */
+  C.halfOf = (team, isRight) => (team === 0) === isRight ? 'bottom' : 'top';
+  C.isCorrectServiceBox = (z, servingTeam, serverHalf) => z.serviceBox === (1 - servingTeam) + (serverHalf === 'top' ? 'bottom' : 'top');
+  return C;
+})();
+const PBS = { PRE_SERVE: 'PRE_SERVE', SERVE_IN_AIR: 'SERVE_IN_AIR', BOUNCE_1_RECEIVER: 'BOUNCE_1_RECEIVER', RETURN_IN_AIR: 'RETURN_IN_AIR', BOUNCE_2_SERVER: 'BOUNCE_2_SERVER', OPEN_RALLY: 'OPEN_RALLY', DEAD: 'DEAD' };
+registerGame({
+  id: 'pickleball', cpu: true, title: 'Pickleball', blurb: 'Official court: serve diagonally, obey the two-bounce rule, stay out of the kitchen, side-out scoring.',
+  kind: 'live', min: 2, max: 4, color: 2,
+  help: 'Hold the paddle with your finger or mouse (keyboard: stick, A swings). Serve with a tap or forward flick: the serve goes diagonally and must land past the yellow kitchen, and the kitchen line is a fault. Two-bounce rule: the serve must bounce, the return must bounce, and only then may anyone volley. Never volley with your paddle in the kitchen, and do not drift into it right after a volley. Only the serving side scores. In doubles the first server starts at 0-0-2, each side then gets two servers, and the server swaps sides after every point. Light touches dink into the kitchen, fast flicks drive, a high ball near the net can be smashed. First to 11, win by two.',
+  touch: 'Put your finger down to hold the paddle. Soft touches dink, fast flicks drive.',
+  icon() { return `<svg viewBox="0 0 200 125" fill="none"><rect x="14" y="22" width="172" height="82" rx="8" fill="#2F7D5B"/><rect x="66" y="22" width="68" height="82" fill="#FFC933" opacity=".5"/><rect x="97" y="22" width="6" height="82" fill="#fff"/><circle cx="48" cy="62" r="16" fill="#8A63D2"/><circle cx="152" cy="46" r="9" fill="#F6E04A"/></svg>`; },
+  create(api) {
+    const n = api.n, { NET, KIT, FT } = PB, G = 1050, E = .8, FR = .8, PR = 36, BR = 11, GOAL = 11;
+    const tm = i => i % 2, dirOf = t => t === 0 ? 1 : -1, tcol = t => api.players[t].color;
+    const members = [seatsOf(n).filter(i => tm(i) === 0), seatsOf(n).filter(i => tm(i) === 1)], doubles = n > 2, hyp = Math.hypot;
+    const isCpu = i => { const d = api.players[i].device; return d === 'cpu' || d === undefined; };
+    const xr = i => tm(i) === 0 ? [18, NET - 14] : [NET + 14, W - 18];
+    let bpx = 0, pd, ball, sc, srvTeam, srvNum, srvA, srvPlayer, rcvPlayer, rightIdx, st, pt, last, bn, hits, over, endT, winner, msg, msgT, flash, trail, watch, served, srvHalf;
+    const maxSrv = () => doubles ? 2 : 1;
+    const partnerOf = i => { const m = members[tm(i)]; return m.length > 1 ? m[1 - m.indexOf(i)] : i; };
+    const halfOfSeat = i => PB.halfOf(tm(i), members[tm(i)].indexOf(i) === rightIdx[tm(i)]);
+    const yOf = h => h === 'top' ? 300 - 85 : 300 + 85;
+    const scoreCall = () => doubles ? `${sc[srvTeam]}-${sc[1 - srvTeam]}-${srvNum}` : `${sc[srvTeam]}-${sc[1 - srvTeam]}`;
+    /* put everyone where the rules say they start the point */
+    function newServe() {
+      st = PBS.PRE_SERVE; pt = .9; last = -1; bn = 0; hits = 0; watch = -1; served = false;
+      const t = srvTeam, m = members[t], court = sc[t] % 2 === 0 ? 'R' : 'L';
+      if (srvNum === 1 || srvA === undefined) { const onCourt = court === 'R' ? m[rightIdx[t]] : (m[1 - rightIdx[t]] === undefined ? m[0] : m[1 - rightIdx[t]]); srvA = srvNum === 1 ? onCourt : partnerOf(onCourt); }
+      srvPlayer = srvNum === 1 ? srvA : partnerOf(srvA);
+      const k = m.indexOf(srvPlayer); rightIdx[t] = court === 'R' ? k : (m.length > 1 ? 1 - k : 0);
+      srvHalf = halfOfSeat(srvPlayer);
+      const rt = 1 - t, rm = members[rt], want = srvHalf === 'top' ? 'bottom' : 'top';
+      if (rm.length === 1) rcvPlayer = rm[0]; else rcvPlayer = rm.find(i => halfOfSeat(i) === want) || rm[0];
+      pd = seatsOf(n).map(() => ({ x: 0, y: 0, vx: 0, vy: 0, sw: 0, cd: 0, fl: 0, mvx: 0, mvy: 0, hx: 0, hy: 0, intent: null }));
+      const put = (i, x, y) => { const p = pd[i]; p.x = p.hx = x; p.y = p.hy = y; };
+      const bx = t === 0 ? PB.X0 - 14 : PB.X1 + 14;
+      put(srvPlayer, bx, yOf(srvHalf)); if (partnerOf(srvPlayer) !== srvPlayer) put(partnerOf(srvPlayer), bx, yOf(srvHalf === 'top' ? 'bottom' : 'top'));
+      const rx = rt === 0 ? PB.X0 + 24 : PB.X1 - 24; put(rcvPlayer, rx, yOf(want));
+      if (partnerOf(rcvPlayer) !== rcvPlayer) put(partnerOf(rcvPlayer), rt === 0 ? NET - KIT - 16 : NET + KIT + 16, yOf(srvHalf));
+      const p = pd[srvPlayer]; ball = { x: p.x + dirOf(t) * 34, y: p.y, z: 34, vx: 0, vy: 0, vz: 0, held: true }; trail = [];
+    }
+    function sideOut() { srvTeam = 1 - srvTeam; srvNum = 1; }
+    function endPoint(faultTeam, why) {
+      api.beep('place'); st = PBS.DEAD; pt = 1.2; msgT = 1.2;
+      if (faultTeam === srvTeam) {
+        if (srvNum < maxSrv()) { srvNum++; msg = why + '. Second server'; } else { sideOut(); msg = why + '. Side out'; }
+      } else {
+        sc[srvTeam]++; msg = why + '. Point';
+        if (sc[srvTeam] >= GOAL && sc[srvTeam] - sc[1 - srvTeam] >= 2) { over = true; endT = 1.2; winner = srvTeam; api.beep('win'); }
+      }
+    }
+    /* find launch speeds that reach (lx,ly) in time T, and lift the arc until it clears the net cord */
+    function solve(lx, ly, Tmin, checkNet) {
+      for (let T = Tmin; T <= 1.5; T += .04) {
+        const vx = (lx - ball.x) / T, vy = (ly - ball.y) / T, vz = (.5 * G * T * T - ball.z) / T;
+        if (!checkNet) return { vx, vy, vz };
+        const tn = (NET - ball.x) / vx; if (!(tn > 0 && tn < T)) return { vx, vy, vz };
+        const zn = ball.z + vz * tn - .5 * G * tn * tn, yn = ball.y + vy * tn; if (zn >= PB.netHeight(yn) + 9) return { vx, vy, vz };
+      }
+      return { vx: (lx - ball.x) / 1.5, vy: (ly - ball.y) / 1.5, vz: (.5 * G * 2.25 - ball.z) / 1.5 };
+    }
+    function pickKind(i, off, pw) {
+      if (!served) return 'serve';
+      const p = pd[i]; if (isCpu(i) && p.intent) return p.intent;
+      const near = Math.abs(p.x - NET) < KIT + 55, high = ball.z > PB.netHeight(ball.y) + 20;
+      if (near && high && pw > .25) return 'smash';
+      if (pw < .2) return near ? 'dink' : (hits === 2 ? 'drop' : 'lob');
+      return pw < .5 && !near ? 'drive' : 'drive';
+    }
+    function strike(i, off) {
+      const p = pd[i], t = tm(i), d = dirOf(t), pw = clamp(Math.max(0, p.vx * d) / 1700, 0, 1), kind = pickKind(i, off, pw), cp = isCpu(i);
+      const L = api.cpu, bad = cp && kind !== 'serve' && rand() < [.3, .2, .12][L] + hits * .012, e = cp ? [34, 14, 5][L] * (bad ? 4.5 : 1) : (14 + 70 * off * off + 50 * pw * pw), er = () => rand(-1, 1) * e;
+      let lx, ly, Tm = .5;
+      const clampY = y => clamp(y, PB.Y0 + 22, PB.Y1 - 22);
+      if (kind === 'serve') {
+        const half = srvHalf === 'top' ? 'bottom' : 'top', cy = yOf(half), dpt = cp ? rand(KIT + 45, KIT + 190) : KIT + 50 + 120 * pw;
+        lx = NET + d * (dpt + er() * .6); ly = clamp(cy + rand(-40, 40) + er() * .6, half === 'top' ? PB.Y0 + 6 : PB.YM + 6, half === 'top' ? PB.YM - 6 : PB.Y1 - 6); Tm = .7;
+      } else if (kind === 'dink' || kind === 'drop') {
+        lx = NET + d * (rand(34, KIT - 34) + er() * .5); ly = clampY((kind === 'dink' && rand() < .6 ? (ball.y < 300 ? PB.Y1 - 40 : PB.Y0 + 40) : 300 + rand(-60, 60)) + er()); Tm = kind === 'drop' ? .95 : (cp && rand() < [.25, .16, .1][L] ? 1.2 : .62);
+      } else if (kind === 'smash') {
+        lx = NET + d * (rand(KIT + 30, KIT + 170) + er() * .6); ly = clampY(300 + rand(-110, 110) + er()); Tm = .3;
+      } else if (kind === 'lob') {
+        lx = NET + d * (rand(290, 360) + er() * .5); ly = clampY(300 + rand(-100, 100) + er()); Tm = 1.1;
+      } else {
+        lx = NET + d * (rand(KIT + 80, 345) + er() * .7); ly = clampY(ball.y + rand(-90, 90) + er()); Tm = .46;
+      }
+      const v = solve(lx, ly, Tm, (cp && !bad) || off < .8);
+      ball.vx = v.vx; ball.vy = v.vy; ball.vz = v.vz; ball.held = false; last = t; bn = 0; hits++; p.fl = .18; flash = .07; p.intent = null;
+      api.beep(kind === 'smash' ? 'boom' : pw > .55 || kind === 'drive' ? 'shot' : 'hit');
+    }
+    function inKitchen(p) { return Math.abs(p.x - NET) <= KIT + PB.LINE; }
+    function onHit(i, off) {
+      const t = tm(i), p = pd[i], volley = bn === 0 && served;
+      if (st === PBS.SERVE_IN_AIR) { endPoint(t, 'Receiver volleyed the serve'); return; }
+      if (st === PBS.RETURN_IN_AIR) { endPoint(t, 'Server volleyed the return'); return; }
+      if (st === PBS.BOUNCE_1_RECEIVER && i !== rcvPlayer) { endPoint(t, 'Wrong receiver'); return; }
+      if (volley && inKitchen(p)) { endPoint(t, 'Kitchen volley'); return; }
+      strike(i, off);
+      if (st === PBS.PRE_SERVE) { served = true; st = PBS.SERVE_IN_AIR; }
+      else if (st === PBS.BOUNCE_1_RECEIVER) st = PBS.RETURN_IN_AIR;
+      else if (st === PBS.BOUNCE_2_SERVER) st = PBS.OPEN_RALLY;
+      watch = volley ? i : -1;
+    }
+    function onBounce() {
+      api.beep('wall'); const c = PB.classify(ball.x, ball.y); bn++; watch = -1; bpx = ball.x;
+      if (bn >= 2) { endPoint(1 - last, 'Ball bounced twice'); return; }
+      if (c.side === last) { endPoint(last, 'Landed on own side'); return; }
+      if (c.isOutOfBounds) { endPoint(last, 'Out'); return; }
+      if (st === PBS.SERVE_IN_AIR) {
+        if (c.isInsideKitchen) { endPoint(last, c.onKitchenLine ? 'Serve on the kitchen line' : 'Serve in the kitchen'); return; }
+        if (!PB.isCorrectServiceBox(c, srvTeam, srvHalf)) { endPoint(last, 'Wrong service box'); return; }
+        st = PBS.BOUNCE_1_RECEIVER;
+      } else if (st === PBS.RETURN_IN_AIR) st = PBS.BOUNCE_2_SERVER;
     }
     return {
-      dragAxes: 'y', drag: i => ({ x: PX[i], y: py[i] }), dbg: () => ({ score, ball, py, serveT }),
+      dragAxes: 'xy', drag: i => pd && pd[i] ? { x: pd[i].x, y: pd[i].y } : null,
       ai(i, dt) {
-        const S = (this.s || (this.s = []))[i] || (this.s[i] = {}), L = api.cpu, out = tm(i) ? -1 : 1;
-        if (S.y == null || Math.abs(S.y - py[i]) > 200) S.y = py[i];
-        let ty = H / 2 + (ball.y - H / 2) * .3;
-        if (!over && ball.vx * out < 0 && Math.abs(ball.vx) > 1) {
-          if (!S.was) { S.err = (rand(-1, 1)) * [100, 76, 52][L]; S.was = true; }
-          const tt = Math.abs(ball.x - PX[i]) / Math.abs(ball.vx), lo = 19, hi = H - 19, r = hi - lo; let y = ball.y + ball.vy * tt - lo; y = ((y % (2 * r)) + 2 * r) % (2 * r); if (y > r) y = 2 * r - y; ty = y + lo + S.err;
-        } else S.was = false;
-        const sp = PS * [.55, .8, 1.05][L] * dt; S.y += clamp(ty - S.y, -sp, sp);
-        return { ptr: { x: PX[i], y: S.y, down: false } };
+        if (!pd || over) return null; const Z = this.zs || (this.zs = []), p = pd[i], z = Z[i] || (Z[i] = { x: p.x, y: p.y, ex: 0, ey: 0, rt: 0, fired: false, last: -1 }), L = api.cpu;
+        const t = tm(i), d = dirOf(t), xs = xr(i), CS = [560, 860, 1200][L] * dt, mates = members[t];
+        if (z.last !== pt && st === PBS.PRE_SERVE && pt > .85) { z.x = p.x; z.y = p.y; z.fired = false; }
+        z.last = pt; if (hyp(z.x - p.x, z.y - p.y) > 260) { z.x = p.x; z.y = p.y; }
+        let tx = p.hx, ty = p.hy, mv = CS * .6, pulse = false;
+        const rush = st === PBS.BOUNCE_2_SERVER || st === PBS.OPEN_RALLY, line = NET - d * (KIT + 14);
+        if (rush) { tx = line; ty = mates.length > 1 ? yOf(halfOfSeat(i)) : 300; mv = CS * 1.1; }
+        if (st === PBS.PRE_SERVE) { if (i === srvPlayer && pt <= 0 && !z.fired) { z.fired = true; p.intent = 'serve'; pulse = true; } }
+        else if (!ball.held && last !== t && st !== PBS.DEAD && st !== PBS.SERVE_IN_AIR) {
+          const s = { x: ball.x, y: ball.y, z: ball.z, vx: ball.vx, vy: ball.vy, vz: ball.vz }; let bounced = bn >= 1 && (ball.x < NET ? 0 : 1) === t, tgt = null, tt = 0, xbp = bounced ? bpx : null;
+          const canVolley = st === PBS.OPEN_RALLY, eligible = st === PBS.BOUNCE_1_RECEIVER ? i === rcvPlayer : (st === PBS.RETURN_IN_AIR || st === PBS.BOUNCE_2_SERVER || st === PBS.OPEN_RALLY);
+          if (eligible) for (let k = 0; k < 320; k++) {
+            const px = s.x; s.vz -= G * .008; s.x += s.vx * .008; s.y += s.vy * .008; s.z += s.vz * .008; tt += .008;
+            if ((px - NET) * (s.x - NET) < 0 && s.z < PB.netHeight(s.y) - 5) break;
+            if (s.z <= 0) { s.z = 0; const c = PB.classify(s.x, s.y); if (c.isOutOfBounds) break; s.vz = -s.vz * E; s.vx *= FR; s.vy *= FR; if (c.side === t) { if (bounced) break; bounced = true; xbp = s.x; } }
+            const mySide = (NET - s.x) * d > 14;
+            if (mySide && s.z < 90 && ((bounced) || (canVolley && (NET - s.x) * d > KIT + 12)) && s.x >= xs[0] - 8 && s.x <= xs[1] + 8) { tgt = { x: s.x, y: s.y, z: s.z, t: tt, vol: !bounced, xb: xbp }; break; }
+          }
+          if (tgt) {
+            let me = true; for (const k of mates) if (k !== i) { const q = pd[k]; { const dq = hyp(q.x - tgt.x, q.y - tgt.y), dm = hyp(p.x - tgt.x, p.y - tgt.y); if (dq < dm - 6 || (Math.abs(dq - dm) <= 6 && k < i)) me = false; } }
+            if (st === PBS.BOUNCE_1_RECEIVER) me = i === rcvPlayer;
+            if (me) {
+              if (z.rt <= 0) { z.ex = rand(-1, 1) * [50, 22, 7][L]; z.ey = rand(-1, 1) * [50, 22, 7][L]; z.rt = 1; }
+              const near = Math.abs(tgt.x - NET) < KIT + 55, high = tgt.z > PB.netHeight(tgt.y) + 14;
+              p.intent = near && high && rand() < [.4, .8, .95][L] ? 'smash' : near ? (rand() < [.5, .72, .8][L] - hits * .01 ? 'dink' : 'drive') : (hits === 2 && L > 0 && rand() < .8 ? 'drop' : rand() < .2 ? 'lob' : 'drive');
+              tx = (tgt.vol ? tgt.x - d * 30 : (tgt.xb == null ? tgt.x : tgt.xb) - d * 66) + z.ex; ty = tgt.y + z.ey; mv = CS * 1.25;
+              if (!tgt.vol && bn >= 1 && tgt.t < [.22, .17, .14][L]) { tx = tgt.x + z.ex + d * [10, 24, 36][L]; mv = CS * 3; }
+              if (tgt.vol) tx = d > 0 ? Math.min(tx, NET - KIT - 10) : Math.max(tx, NET + KIT + 10);
+            }
+          }
+        }
+        z.rt -= dt;
+        /* the kitchen is off limits unless the ball has already bounced in it and I am going for that ball */
+        const tracking = !ball.held && last !== t && bn >= 1 && Math.abs(ball.x - NET) <= KIT + 4 && (ball.x < NET ? 0 : 1) === t;
+        if (!tracking) tx = d > 0 ? Math.min(tx, NET - KIT - 10) : Math.max(tx, NET + KIT + 10);
+        tx = clamp(tx, xs[0], xs[1]); ty = clamp(ty, PB.Y0 - 40, PB.Y1 + 40);
+        const dx = tx - z.x, dy = ty - z.y, dd = hyp(dx, dy) || 1, s2 = Math.min(dd, mv); z.x += dx / dd * s2; z.y += dy / dd * s2;
+        return { a: pulse, ptr: { x: z.x, y: z.y, down: false } };
       },
-      reset(r) { over = false; score = [0, 0]; py = api.players.map(() => H / 2); flash = api.players.map(() => 0); serve(r % 2 ? 1 : -1); },
+      dbg() { return JSON.stringify({ st, pt, hits, bn, srvTeam, srvNum, srvPlayer, rcvPlayer, sc, msg, ball, p0: pd[0], p1: pd[1] }); },
+      reset(r) { sc = [0, 0]; srvTeam = r % 2; srvNum = doubles ? 2 : 1; srvA = undefined; rightIdx = [0, 0]; over = false; endT = 0; winner = -1; msg = ''; msgT = 0; flash = 0; newServe(); },
       update(dt) {
-        for (let i = 0; i < N(); i++) { { const s0 = api.input(i); py[i] = clamp(s0.ph ? s0.py : py[i] + s0.y * PS * dt, PH / 2 + 12, H - PH / 2 - 12); } flash[i] = Math.max(0, flash[i] - dt); }
-        if (serveT > 0) {
-          serveT -= dt;
-          if (serveT <= 0) { const a = rand(-.45, .45); ball.vx = Math.cos(a) * ball.sp * ball.dir; ball.vy = Math.sin(a) * ball.sp; }
+        msgT -= dt; flash = Math.max(0, flash - dt);
+        for (let i = 0; i < n; i++) {
+          const p = pd[i], s = api.input(i), xs = xr(i), ox = p.x, oy = p.y, d = dirOf(tm(i)); let lo = xs[0], hi = xs[1], yl = PB.Y0 - 50, yh = PB.Y1 + 50;
+          if (st === PBS.PRE_SERVE && i === srvPlayer) { if (tm(i) === 0) { lo = 14; hi = PB.X0 - 4; } else { lo = PB.X1 + 4; hi = W - 14; } if (srvHalf === 'top') yh = PB.YM - 8; else yl = PB.YM + 8; yl = Math.max(yl, PB.Y0 + 4); yh = Math.min(yh, PB.Y1 - 4); }
+          p.cd -= dt; p.fl -= dt; p.sw -= dt;
+          if (s.ph) { const tx = clamp(s.px, lo, hi), ty = clamp(s.py, yl, yh); let dx = (tx - p.x) * Math.min(1, dt * 20), dy = (ty - p.y) * Math.min(1, dt * 20); const m = hyp(dx, dy), cap = 3000 * dt; if (m > cap) { dx *= cap / m; dy *= cap / m; } p.x += dx; p.y += dy; }
+          else {
+            let ax = s.x * 2600, ay = s.y * 2600; if (s.pa && p.cd <= 0) { p.cd = .35; p.sw = .14; api.beep('dash'); } if (p.sw > 0) ax += d * 9000;
+            p.mvx = (p.mvx + ax * dt) * Math.exp(-7 * dt); p.mvy = (p.mvy + ay * dt) * Math.exp(-7 * dt);
+            const m = hyp(p.mvx, p.mvy), mx = p.sw > 0 ? 1900 : 520; if (m > mx) { p.mvx *= mx / m; p.mvy *= mx / m; } p.x += p.mvx * dt; p.y += p.mvy * dt;
+          }
+          p.x = clamp(p.x, lo, hi); p.y = clamp(p.y, yl, yh);
+          p.vx += ((p.x - ox) / dt - p.vx) * .55; p.vy += ((p.y - oy) / dt - p.vy) * .55;
+        }
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${sc[0]} to ${sc[1]}.`); return; }
+        if (st === PBS.DEAD) { pt -= dt; if (pt <= 0) newServe(); return; }
+        if (watch >= 0 && inKitchen(pd[watch])) { const w = watch; watch = -1; endPoint(tm(w), 'Stepped into the kitchen after a volley'); return; }
+        if (st === PBS.PRE_SERVE) {
+          pt -= dt; const p = pd[srvPlayer], d = dirOf(srvTeam); ball.x = p.x + d * 34; ball.y = p.y; ball.z = 34;
+          if (pt <= 0) { const s = api.input(srvPlayer); if (s.pa || s.ppr || p.vx * d > 420 || pt < -2.4) onHit(srvPlayer, .3); }
           return;
         }
-        const sp = Math.hypot(ball.vx, ball.vy), n = Math.max(1, Math.ceil(sp * dt / 6));
-        for (let k = 0; k < n && !over; k++) step(dt / n);
-        if (!over) { trail.push([ball.x, ball.y]); if (trail.length > 9) trail.shift(); }
+        const px0 = ball.x; ball.vz -= G * dt; ball.x += ball.vx * dt; ball.y += ball.vy * dt; ball.z += ball.vz * dt;
+        trail.push({ x: ball.x, y: ball.y, z: ball.z, t: .22 }); trail.forEach(q => q.t -= dt); trail = trail.filter(q => q.t > 0);
+        if ((px0 - NET) * (ball.x - NET) < 0) {
+          const h = PB.netHeight(ball.y);
+          if (ball.z < h - 5) { api.beep('no'); endPoint(last, 'Net'); return; }
+          if (ball.z < h + 4) { ball.vx *= .55; ball.vz = Math.max(ball.vz * .4, 50); api.beep('select'); }
+        }
+        if (ball.z <= 0) { ball.z = 0; ball.vz = -ball.vz * E; ball.vx *= FR; ball.vy *= FR; onBounce(); if (st === PBS.DEAD) return; }
+        if (ball.x < -60 || ball.x > W + 60 || ball.y < -20 || ball.y > H + 20) { endPoint(bn >= 1 ? 1 - last : last, 'Out'); return; }
+        for (let i = 0; i < n; i++) {
+          const t = tm(i), p = pd[i]; if (last === t || ball.z > 100 || ball.z < -2) continue;
+          const dd = hyp(ball.x - p.x, ball.y - p.y); if (dd < PR + BR) { onHit(i, clamp(dd / (PR + BR), 0, 1)); p.sw = 0; break; }
+        }
       },
       draw(g) {
-        g.fillStyle = SCR.line; g.fillRect(0, 0, W, 8); g.fillRect(0, H - 8, W, 8);
-        for (let y = 20; y < H - 20; y += 34) g.fillRect(W / 2 - 2, y, 4, 18);
-        D.text(g, score[0], W / 2 - 90, 78, 96, col(0)); D.text(g, score[1], W / 2 + 90, 78, 96, col(1)); if (N() > 2) D.text(g, 'Doubles', W / 2, H - 22, 20, SCR.dim);
-        for (let i = 0; i < N(); i++) {
-          const w = PW + flash[i] * 40; g.fillStyle = col(tm(i) === i ? i : i); D.rr(g, PX[i] - w / 2, py[i] - PH / 2, w, PH, 6); g.fill();
+        const T = (x, y, w, h, c, r) => { g.fillStyle = c; D.rr(g, x, y, w, h, r || 0); g.fill(); };
+        g.fillStyle = '#1C2B36'; g.fillRect(0, 0, W, H); g.fillStyle = '#22333F'; for (let k = 0; k < 12; k++) g.fillRect(k * 80, 0, 40, H);
+        const X0 = PB.X0, X1 = PB.X1, Y0 = PB.Y0, Y1 = PB.Y1, YM = PB.YM;
+        T(X0 - 26, Y0 - 22, X1 - X0 + 52, Y1 - Y0 + 44, '#2A6A8C', 12); T(X0, Y0, X1 - X0, Y1 - Y0, '#3F8F6B', 2);
+        g.globalAlpha = .38; g.fillStyle = '#FFC933'; g.fillRect(NET - KIT, Y0, KIT * 2, Y1 - Y0); g.globalAlpha = 1;
+        if (st === PBS.PRE_SERVE || st === PBS.SERVE_IN_AIR) { const tgtT = 1 - srvTeam, half = srvHalf === 'top' ? 'bottom' : 'top'; g.globalAlpha = .3 + .12 * Math.sin(performance.now() / 180); g.fillStyle = '#fff'; g.fillRect(tgtT === 1 ? NET + KIT : X0, half === 'top' ? Y0 : YM, tgtT === 1 ? X1 - NET - KIT : NET - KIT - X0, YM - Y0); g.globalAlpha = 1; }
+        g.fillStyle = '#F2F4F7'; const lw = 3;
+        g.fillRect(X0 - lw / 2, Y0 - lw / 2, X1 - X0 + lw, lw); g.fillRect(X0 - lw / 2, Y1 - lw / 2, X1 - X0 + lw, lw); g.fillRect(X0 - lw / 2, Y0, lw, Y1 - Y0); g.fillRect(X1 - lw / 2, Y0, lw, Y1 - Y0);
+        g.fillRect(NET - KIT - lw / 2, Y0, lw, Y1 - Y0); g.fillRect(NET + KIT - lw / 2, Y0, lw, Y1 - Y0);
+        g.fillRect(X0, YM - lw / 2, NET - KIT - X0, lw); g.fillRect(NET + KIT, YM - lw / 2, X1 - NET - KIT, lw);
+        D.text(g, 'kitchen', NET - KIT / 2 - 6, Y1 + 38, 13, SCR.dim, 'center', 700); D.text(g, 'kitchen', NET + KIT / 2 + 6, Y1 + 38, 13, SCR.dim, 'center', 700);
+        // net with its sag
+        g.fillStyle = 'rgba(0,0,0,.3)'; g.fillRect(NET + 2, Y0 - 16, 7, Y1 - Y0 + 32); g.fillStyle = '#D9DEE5'; g.fillRect(NET - 3, Y0 - 14, 6, Y1 - Y0 + 28);
+        g.fillStyle = 'rgba(255,255,255,.5)'; for (let y = Y0 - 14; y < Y1 + 14; y += 12) g.fillRect(NET - 3, y, 6, 6);
+        T(NET - 7, Y0 - 22, 14, 11, '#2C3946', 4); T(NET - 7, Y1 + 11, 14, 11, '#2C3946', 4);
+        for (let i = 0; i < n; i++) { const t = tm(i), k = members[t].indexOf(i), bx = t === 0 ? 40 + k * 36 : W - 40 - k * 36; puppet(g, api, i, bx, clamp(pd[i].y + 40, 150, 560), .46, pd[i].fl > 0 ? 'attack' : 'hold', t === 0 ? 1 : -1, true); }
+        for (const q of trail) { g.globalAlpha = clamp(q.t * 2.2, 0, .5); D.disc(g, q.x, q.y - q.z * .6, BR * .7, '#fff'); } g.globalAlpha = 1;
+        for (let i = 0; i < n; i++) {
+          const p = pd[i], t = tm(i), d = dirOf(t), c = api.players[i].color, ring = i === srvPlayer && st === PBS.PRE_SERVE;
+          g.save(); g.translate(p.x, p.y); g.rotate((d > 0 ? Math.PI : 0) + (p.vy * d * -.00028));
+          g.fillStyle = 'rgba(0,0,0,.28)'; g.beginPath(); g.ellipse(4, 12, PR, PR * .9, 0, 0, TAU); g.fill();
+          g.fillStyle = '#B07A45'; D.rr(g, -6, -7, PR + 24, 14, 6); g.fill();
+          g.fillStyle = c; g.beginPath(); g.arc(0, 0, PR + (p.fl > 0 ? 4 : 0), 0, TAU); g.fill();
+          g.fillStyle = 'rgba(255,255,255,.2)'; g.beginPath(); g.arc(-8, -8, PR * .5, 0, TAU); g.fill();
+          g.fillStyle = 'rgba(0,0,0,.18)'; g.beginPath(); g.arc(0, 0, PR * .6, 0, TAU); g.fill();
+          if (ring) { g.strokeStyle = '#fff'; g.lineWidth = 3; g.setLineDash([6, 6]); g.beginPath(); g.arc(0, 0, PR + 9, 0, TAU); g.stroke(); g.setLineDash([]); }
+          g.restore();
         }
-        trail.forEach((p, i) => { g.globalAlpha = i / trail.length * .35; D.disc(g, p[0], p[1], ball.r * (.5 + i / trail.length * .5), SCR.fg); });
-        g.globalAlpha = 1; D.disc(g, ball.x, ball.y, ball.r, SCR.fg);
+        { const b = ball, sx = b.x, sy = b.y - b.z * .6, r = BR * (1 + b.z / 420); g.fillStyle = 'rgba(0,0,0,' + clamp(.34 - b.z / 500, .08, .34) + ')'; g.beginPath(); g.ellipse(b.x, b.y + 2, BR * (1 - clamp(b.z / 500, 0, .4)), BR * .5, 0, 0, TAU); g.fill(); D.disc(g, sx, sy, r, '#F6E04A'); D.disc(g, sx - r * .3, sy - r * .3, r * .3, 'rgba(255,255,255,.8)'); g.fillStyle = 'rgba(160,130,0,.6)'; for (let k = 0; k < 4; k++) D.disc(g, sx + Math.cos(k * 1.6) * r * .45, sy + Math.sin(k * 1.6) * r * .45, 1.6, 'rgba(120,95,0,.8)'); }
+        if (flash > 0) { g.fillStyle = 'rgba(255,255,255,' + flash * 1.2 + ')'; g.fillRect(0, 0, W, H); }
+        [0, 1].forEach(t => { const x = t === 0 ? 120 : W - 120; D.text(g, members[t].map(i => api.players[i].name).join(' + '), x, 38, 15, tcol(t), 'center', 800); D.text(g, sc[t], x, 96, 58, tcol(t)); if (srvTeam === t) D.text(g, 'serving' + (doubles ? ' (server ' + srvNum + ')' : ''), x, 130, 13, SCR.dim, 'center', 600); });
+        D.text(g, scoreCall(), W / 2, 44, 34, SCR.fg); D.text(g, 'serving score - other score' + (doubles ? ' - server' : '') + '. First to 11, win by 2', W / 2, 68, 13, SCR.dim, 'center', 600);
+        const hint = st === PBS.PRE_SERVE ? api.players[srvPlayer].name + ': serve diagonally. Tap or flick forward' : st === PBS.SERVE_IN_AIR || st === PBS.BOUNCE_1_RECEIVER ? 'Two-bounce rule: let it bounce, return it, then the server lets that bounce too' : st === PBS.RETURN_IN_AIR ? 'Server side: let the return bounce' : '';
+        if (hint && !over) D.text(g, hint, W / 2, 568, 16, SCR.fg, 'center', 700);
+        if (msgT > 0 && msg) D.text(g, msg, W / 2, 530, 28, '#FFC933');
+        if (over) D.text(g, members[winner].map(i => api.players[i].name).join(' + ') + ' win' + (members[winner].length > 1 ? '' : 's'), W / 2, 330, 50, tcol(winner));
       }
     };
   }
@@ -2987,13 +3412,13 @@ function repeater() {
 /* ---------- Reversi ---------- */
 registerGame({
   id: 'reversi', cpu: true, title: 'Reversi', blurb: 'Outflank to flip. Most discs at the end wins.',
-  kind: 'turns', min: 2, max: 2, color: 1,
-  help: 'Move the cursor to a marked square and press A. Every move must flip at least one disc. If you have no move, you pass.',
+  kind: 'turns', min: 2, max: 4, color: 1,
+  help: 'With three or four players the board grows to 12 by 12 and any rival colour can be flipped. Move the cursor to a marked square and press A. Every move must flip at least one disc. If you have no move, you pass.',
   icon() {
     return `<svg viewBox="0 0 200 125"><rect x="46" y="10" width="108" height="108" rx="8" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="76" cy="40" r="15" fill="#0F1923"/><circle cx="124" cy="40" r="15" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="76" cy="88" r="15" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="124" cy="88" r="15" fill="#0F1923"/></svg>`;
   },
   create(api) {
-    const N = 8, C = 60, B = N * C, X0 = (W - B) / 2, Y0 = 84, col = i => api.players[i].color;
+    const n = api.n, N = n > 2 ? 12 : 8, C = n > 2 ? 42 : 60, B = N * C, X0 = (W - B) / 2, Y0 = n > 2 ? 78 : 84, col = i => api.players[i].color, RD = Math.round(C * .385);
     const DIRS = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
     let b, turn, cx, cy, over, endT, msg, pop, valid, rep = repeater();
     const inb = (r, c) => r >= 0 && r < N && c >= 0 && c < N;
@@ -3001,20 +3426,21 @@ registerGame({
       if (b[r][c] !== -1) return []; const out = [];
       for (const [dr, dc] of DIRS) {
         const line = []; let rr = r + dr, cc = c + dc;
-        while (inb(rr, cc) && b[rr][cc] === 1 - p) { line.push([rr, cc]); rr += dr; cc += dc; }
+        while (inb(rr, cc) && b[rr][cc] >= 0 && b[rr][cc] !== p) { line.push([rr, cc]); rr += dr; cc += dc; }
         if (line.length && inb(rr, cc) && b[rr][cc] === p) out.push(...line);
       }
       return out;
     }
     const movesOf = p => { const m = []; for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (flips(r, c, p).length) m.push(r * N + c); return m; };
     const count = p => b.flat().filter(v => v === p).length;
+    const leader = () => { const cs = Array.from({ length: n }, (_, p) => [count(p), p]).sort((x, y) => y[0] - x[0]); return cs[0][0] === cs[1][0] ? -1 : cs[0][1]; };
     function place(r, c) {
       const f = flips(r, c, turn); if (over || !f.length) { if (!over) api.beep('no'); return; }
       b[r][c] = turn; pop[r * N + c] = .3; f.forEach(([a, d]) => { b[a][d] = turn; pop[a * N + d] = .35; }); api.beep('place');
-      const o = 1 - turn; msg = '';
-      if (movesOf(o).length) turn = o;
-      else if (movesOf(turn).length) msg = api.players[o].name + ' has no move and passes.';
-      else { over = true; endT = 1.3; }
+      msg = ''; let nx = -1; const skipped = [];
+      for (let k = 1; k <= n; k++) { const q = (turn + k) % n; if (movesOf(q).length) { nx = q; break; } if (q !== turn) skipped.push(api.players[q].name); }
+      if (nx < 0) { over = true; endT = 1.3; }
+      else { if (skipped.length) msg = skipped.join(', ') + (skipped.length > 1 ? ' have no move and pass.' : ' has no move and passes.'); turn = nx; }
       valid = movesOf(turn); api.turn(turn);
     }
     return {
@@ -3028,12 +3454,14 @@ registerGame({
         place(Math.floor(bm / N), bm % N); return null;
       },
       reset(r) {
-        b = Array.from({ length: N }, () => Array(N).fill(-1)); b[3][3] = 1; b[4][4] = 1; b[3][4] = 0; b[4][3] = 0;
-        turn = r % 2; cx = 2; cy = 2; over = false; endT = 0; msg = ''; pop = {}; valid = movesOf(turn); api.turn(turn);
+        b = Array.from({ length: N }, () => Array(N).fill(-1));
+        if (n <= 2) { b[3][3] = 1; b[4][4] = 1; b[3][4] = 0; b[4][3] = 0; }
+        else { const o = N / 2 - 2; for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { const p = (i >> 1) * 2 + (j >> 1); b[o + i][o + j] = p < n ? p : -1; } }
+        turn = r % n; if (!movesOf(turn).length) for (let k = 1; k < n; k++) if (movesOf((turn + k) % n).length) { turn = (turn + k) % n; break; } cx = 2; cy = 2; over = false; endT = 0; msg = ''; pop = {}; valid = movesOf(turn); api.turn(turn);
       },
       update(dt) {
         for (const k in pop) { pop[k] -= dt; if (pop[k] <= 0) delete pop[k]; }
-        if (over) { endT -= dt; if (endT <= 0) { const a = count(0), d = count(1); api.endRound(a === d ? -1 : a > d ? 0 : 1, `${a} to ${d}.`); } return; }
+        if (over) { endT -= dt; if (endT <= 0) { api.endRound(leader(), Array.from({ length: n }, (_, p) => count(p)).join(' to ') + '.'); } return; }
         const s = api.input(turn), [dx, dy] = rep(s, dt);
         cx = clamp(cx + dx, 0, N - 1); cy = clamp(cy + dy, 0, N - 1);
         if (s.pa) place(cy, cx);
@@ -3043,8 +3471,8 @@ registerGame({
         cx = Math.floor((x - X0) / C); cy = Math.floor((y - Y0) / C); if (t === 'down') place(cy, cx);
       },
       draw(g) {
-        const a = count(0), d = count(1);
-        D.text(g, over ? (a === d ? 'Draw' : api.players[a > d ? 0 : 1].name + ' wins') : api.players[turn].name + "'s turn", W / 2, 38, 38, over ? SCR.fg : col(turn));
+        const ld = over ? leader() : -1;
+        D.text(g, over ? (ld < 0 ? 'Draw' : api.players[ld].name + ' wins') : api.players[turn].name + "'s turn", W / 2, 38, 38, over ? SCR.fg : col(turn));
         if (msg && !over) D.text(g, msg, W / 2, 66, 18, SCR.dim, 'center', 600);
         g.fillStyle = '#183B3B'; D.rr(g, X0 - 8, Y0 - 8, B + 16, B + 16, 12); g.fill();
         g.strokeStyle = '#2E6A66'; g.lineWidth = 2; g.beginPath();
@@ -3053,10 +3481,11 @@ registerGame({
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
           if (b[r][c] < 0) continue; const p = pop[r * N + c] || 0, k = 1 + Math.sin(p / .35 * Math.PI) * .22;
           const x = X0 + c * C + C / 2, y = Y0 + r * C + C / 2;
-          D.disc(g, x + 2, y + 4, 23 * k, 'rgba(0,0,0,.3)'); D.disc(g, x, y, 23 * k, col(b[r][c])); D.disc(g, x - 7, y - 8, 7 * k, 'rgba(255,255,255,.22)');
+          D.disc(g, x + 2, y + 3, RD * k, 'rgba(0,0,0,.3)'); D.disc(g, x, y, RD * k, col(b[r][c])); D.disc(g, x - RD * .3, y - RD * .35, RD * .3 * k, 'rgba(255,255,255,.22)');
         }
         if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([9, 7]); D.rr(g, X0 + cx * C + 4, Y0 + cy * C + 4, C - 8, C - 8, 8); g.stroke(); g.setLineDash([]); }
-        for (const [i, x] of [[0, 120], [1, W - 120]]) { D.text(g, api.players[i].name, x, Y0 + 90, 22, col(i)); D.text(g, i ? d : a, x, Y0 + 160, 80, col(i)); }
+        const pos = n > 2 ? [[0, 100, 100], [1, W - 100, 100], [2, 100, 300], [3, W - 100, 300]] : [[0, 120, Y0 + 90], [1, W - 120, Y0 + 90]];
+        for (const [i, x, y] of pos) { if (i >= n) continue; D.text(g, api.players[i].name, x, y, 20, col(i)); D.text(g, count(i), x, y + (n > 2 ? 56 : 70), n > 2 ? 56 : 80, col(i)); }
       }
     };
   }
@@ -3066,14 +3495,14 @@ registerGame({
 registerGame({
   id: 'dots', cpu: true, title: 'Dots & Boxes', blurb: 'Draw lines between dots. Close a box, claim it, go again.',
   kind: 'turns', min: 2, max: 4, color: 2,
-  help: 'Move along the lines and press A to draw one. B switches between horizontal and vertical lines. Finish a box to take another turn.',
+  help: 'Move along the lines and press A to draw one. B switches between horizontal and vertical lines. Finish a box to take another turn. The grid grows with more players.',
   icon() {
     let s = '<rect x="68" y="30" width="32" height="32" fill="#0F1923" opacity=".35"/><g stroke="#0F1923" stroke-width="5" stroke-linecap="round"><path d="M68 30H132M68 62H100M68 30V94M100 30V62M132 30V62M100 94H132"/></g>';
     for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) s += `<circle cx="${68 + c * 32}" cy="${30 + r * 32}" r="6.5" fill="#0F1923"/>`;
     return `<svg viewBox="0 0 200 125">${s}</svg>`;
   },
   create(api) {
-    const N = 5, S = 88, X0 = (W - N * S) / 2, Y0 = 112, n = api.n, col = i => api.players[i].color;
+    const n = api.n, N = n > 3 ? 7 : n > 2 ? 6 : 5, S = n > 3 ? 65 : n > 2 ? 76 : 88, X0 = (W - N * S) / 2, Y0 = 112, col = i => api.players[i].color;
     let hE, vE, box, turn, cur, over, endT, got, again, rep = repeater();
     const mk = (r, c) => Array.from({ length: r }, () => Array(c).fill(-1));
     const dx = c => X0 + c * S, dy = r => Y0 + r * S;
@@ -3091,7 +3520,7 @@ registerGame({
       if (!gain) { turn = (turn + 1) % n; api.turn(turn); }
     }
     function nearest(x, y) {
-      let best = null, bd = 38;
+      let best = null, bd = S * .43;
       for (let r = 0; r <= N; r++) for (let c = 0; c < N; c++) { const d = Math.hypot(x - (dx(c) + dx(c + 1)) / 2, y - dy(r)); if (d < bd) { bd = d; best = { t: 'h', r, c }; } }
       for (let r = 0; r < N; r++) for (let c = 0; c <= N; c++) { const d = Math.hypot(x - dx(c), y - (dy(r) + dy(r + 1)) / 2); if (d < bd) { bd = d; best = { t: 'v', r, c }; } }
       return best;
@@ -3119,7 +3548,7 @@ registerGame({
         if (Z[i] > 0) return null;
         Z[i] = null; const e = pickEdge(); if (!e) return null; cur = e; place(); return null;
       },
-      reset(r) { hE = mk(N + 1, N); vE = mk(N, N + 1); box = mk(N, N); got = Array(n).fill(0); turn = r % n; cur = { t: 'h', r: 2, c: 2 }; over = false; endT = 0; again = false; api.turn(turn); },
+      reset(r) { hE = mk(N + 1, N); vE = mk(N, N + 1); box = mk(N, N); got = Array(n).fill(0); turn = r % n; cur = { t: 'h', r: N >> 1, c: N >> 1 }; over = false; endT = 0; again = false; api.turn(turn); },
       update(dt) {
         if (over) {
           endT -= dt; if (endT <= 0) { const m = Math.max(...got), w = got.map((v, i) => v === m ? i : -1).filter(i => i >= 0); api.endRound(w.length === 1 ? w[0] : -1, got.join(' to ') + ' boxes.'); } return;
@@ -3139,7 +3568,7 @@ registerGame({
         }
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (box[r][c] >= 0) {
           g.globalAlpha = .32; g.fillStyle = col(box[r][c]); g.fillRect(dx(c) + 5, dy(r) + 5, S - 10, S - 10); g.globalAlpha = 1;
-          D.text(g, api.players[box[r][c]].name.charAt(0).toUpperCase(), dx(c) + S / 2, dy(r) + S / 2 + 2, 38, col(box[r][c]));
+          D.text(g, api.players[box[r][c]].name.charAt(0).toUpperCase(), dx(c) + S / 2, dy(r) + S / 2 + 2, Math.round(S * .43), col(box[r][c]));
         }
         g.lineCap = 'round';
         const seg = (x1, y1, x2, y2, o) => { g.strokeStyle = o >= 0 ? col(o) : SCR.line; g.lineWidth = o >= 0 ? 9 : 4; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); };
@@ -3150,7 +3579,7 @@ registerGame({
           g.beginPath(); if (cur.t === 'h') { g.moveTo(dx(cur.c), dy(cur.r)); g.lineTo(dx(cur.c + 1), dy(cur.r)); } else { g.moveTo(dx(cur.c), dy(cur.r)); g.lineTo(dx(cur.c), dy(cur.r + 1)); }
           g.stroke(); g.globalAlpha = 1;
         }
-        for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) D.disc(g, dx(c), dy(r), 7, SCR.fg);
+        for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) D.disc(g, dx(c), dy(r), S > 80 ? 7 : 6, SCR.fg);
       }
     };
   }
@@ -3347,18 +3776,25 @@ registerGame({
 /* ---------- Checkers ---------- */
 registerGame({
   id: 'checkers', cpu: true, title: 'Checkers', blurb: 'Jump to capture, crown at the far edge. Captures are mandatory.',
-  kind: 'turns', min: 2, max: 2, color: 0,
-  help: 'Move the cursor to one of your pieces and press A, then pick a highlighted square. B cancels. If a capture is available you must take it, and multi-jumps must be finished.',
+  kind: 'turns', min: 2, max: 4, color: 0,
+  help: 'With three or four players the board grows to 12 by 12 and each player starts on their own side. Move the cursor to one of your pieces and press A, then pick a highlighted square. B cancels. If a capture is available you must take it, and multi-jumps must be finished.',
   icon() {
     let s = '';
     for (let r = 0; r < 4; r++) for (let c = 0; c < 6; c++) if ((r + c) % 2) s += `<rect x="${40 + c * 20}" y="${22 + r * 20}" width="20" height="20" fill="#0F1923" opacity=".85"/>`;
     return `<svg viewBox="0 0 200 125"><rect x="40" y="22" width="120" height="80" fill="none" stroke="#0F1923" stroke-width="4"/>${s}<circle cx="70" cy="72" r="7.5" fill="#F4F7F9" stroke="#0F1923" stroke-width="3"/><circle cx="110" cy="52" r="7.5" fill="#F4F7F9" stroke="#0F1923" stroke-width="3"/></svg>`;
   },
   create(api) {
-    const C = 64, B = 512, X0 = (W - B) / 2, Y0 = 62, col = i => api.players[i].color;
-    let b, turn, cr, cc, sel, chain, over, endT, winner, quiet, rep = repeater();
-    const inb = (r, c) => r >= 0 && r < 8 && c >= 0 && c < 8;
-    const dirsOf = pc => pc.k ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : (pc.p === 0 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]]);
+    const n = api.n, NB = n > 2 ? 12 : 8, C = n > 2 ? 43 : 64, B = NB * C, X0 = (W - B) / 2, Y0 = n > 2 ? 58 : 62, col = i => api.players[i].color, R = Math.round(C * .39);
+    let b, turn, cr, cc, sel, chain, over, endT, winner, quiet, out, rep = repeater();
+    const inb = (r, c) => r >= 0 && r < NB && c >= 0 && c < NB;
+    /* side 0 plays up from the bottom, 1 plays down from the top, 2 plays right from the left edge, 3 plays left from the right edge */
+    const FW = [[-1, 0], [1, 0], [0, 1], [0, -1]];
+    const dirsOf = pc => {
+      if (pc.k) return [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+      const [fr, fc] = FW[pc.p]; return fr ? [[fr, -1], [fr, 1]] : [[-1, fc], [1, fc]];
+    };
+    const crown = (p, r, c) => p === 0 ? r === 0 : p === 1 ? r === NB - 1 : p === 2 ? c === NB - 1 : c === 0;
+    const prog = (p, r, c) => p === 0 ? NB - 1 - r : p === 1 ? r : p === 2 ? c : NB - 1 - c;
     function jumpsOf(r, c) {
       const pc = b[r][c], res = [];
       for (const [dr, dc] of dirsOf(pc)) { const mr = r + dr, mc = c + dc, tr = r + 2 * dr, tc = c + 2 * dc; if (inb(tr, tc) && b[mr][mc] && b[mr][mc].p !== pc.p && !b[tr][tc]) res.push({ fr: r, fc: c, tr, tc, cap: [mr, mc] }); }
@@ -3372,18 +3808,29 @@ registerGame({
     function allMoves(p) {
       if (chain) return jumpsOf(chain.r, chain.c);
       const j = [], s = [];
-      for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) if (b[r][c] && b[r][c].p === p) { j.push(...jumpsOf(r, c)); s.push(...stepsOf(r, c)); }
+      for (let r = 0; r < NB; r++) for (let c = 0; c < NB; c++) if (b[r][c] && b[r][c].p === p) { j.push(...jumpsOf(r, c)); s.push(...stepsOf(r, c)); }
       return j.length ? j : s;
     }
-    const count = p => b.flat().filter(v => v && v.p === p).length;
+    const count = p => { let k = 0; for (const row of b) for (const v of row) if (v && v.p === p) k++; return k; };
+    const alive = () => { const a = []; for (let p = 0; p < n; p++) if (!out[p]) a.push(p); return a; };
     function focus() { const m = allMoves(turn)[0]; if (m) { cr = m.fr; cc = m.fc; } }
+    /* pass the turn to the next player who can still move; players who cannot are out and lose their pieces */
+    function nextTurn() {
+      for (let k = 1; k <= n; k++) {
+        const p = (turn + k) % n; if (out[p]) continue;
+        if (count(p) && allMoves(p).length) { turn = p; api.turn(turn); return true; }
+        out[p] = true; for (let r = 0; r < NB; r++) for (let c = 0; c < NB; c++) if (b[r][c] && b[r][c].p === p) b[r][c] = null;
+        const a = alive(); if (a.length <= 1) { over = true; endT = 1.2; winner = a.length ? a[0] : -1; return false; }
+      }
+      const a = alive(); over = true; endT = 1.2; winner = a.length === 1 ? a[0] : -1; return false;
+    }
     function doMove(m) {
       const pc = b[m.fr][m.fc]; b[m.fr][m.fc] = null; b[m.tr][m.tc] = pc; let crowned = false;
-      if (!pc.k && ((pc.p === 0 && m.tr === 0) || (pc.p === 1 && m.tr === 7))) { pc.k = true; crowned = true; }
+      if (!pc.k && crown(pc.p, m.tr, m.tc)) { pc.k = true; crowned = true; }
       if (m.cap) { b[m.cap[0]][m.cap[1]] = null; quiet = 0; api.beep('hit'); } else { api.beep('place'); quiet = (pc.k && !crowned) ? quiet + 1 : 0; }
       if (m.cap && !crowned && jumpsOf(m.tr, m.tc).length) { chain = { r: m.tr, c: m.tc }; sel = { r: m.tr, c: m.tc }; cr = m.tr; cc = m.tc; return; }
-      chain = null; sel = null; turn = 1 - turn; api.turn(turn);
-      if (!allMoves(turn).length) { over = true; endT = 1.2; winner = 1 - turn; } else if (quiet >= 80) { over = true; endT = 1; winner = -1; } else focus();
+      chain = null; sel = null;
+      if (nextTurn()) { if (quiet >= 30 * n) { over = true; endT = 1; const cs = alive().map(p => [count(p), p]).sort((x, y) => y[0] - x[0]); winner = cs.length > 1 && cs[0][0] === cs[1][0] ? -1 : cs[0][1]; quiet = -1; } else focus(); }
     }
     function press(r, c) {
       if (over) return; const ms = allMoves(turn);
@@ -3399,14 +3846,13 @@ registerGame({
       b = save.map(row => row.map(v => v && { p: v.p, k: v.k }));
       const pc = b[m.fr][m.fc]; b[m.fr][m.fc] = null; b[m.tr][m.tc] = pc; let v = 0;
       if (m.cap) { b[m.cap[0]][m.cap[1]] = null; v += 10; }
-      if (!pc.k && ((p === 0 && m.tr === 0) || (p === 1 && m.tr === 7))) { pc.k = true; v += 5; }
-      v += pc.k ? 0 : .25 * (p === 0 ? 7 - m.tr : m.tr);
-      if (m.tc === 0 || m.tc === 7) v += .6;
+      if (!pc.k && crown(p, m.tr, m.tc)) { pc.k = true; v += 5; }
+      v += pc.k ? 0 : .25 * prog(p, m.tr, m.tc) * 8 / NB;
+      if (m.tc === 0 || m.tc === NB - 1 || m.tr === 0 || m.tr === NB - 1) v += .6;
       const more = m.cap && jumpsOf(m.tr, m.tc).length;
       if (!more) {
-        let danger = 0;
-        for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) if (b[r][c] && b[r][c].p !== p) for (const j of jumpsOf(r, c)) if (j.cap[0] === m.tr && j.cap[1] === m.tc) danger = 1;
-        let any = 0; for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) if (b[r][c] && b[r][c].p !== p) any += jumpsOf(r, c).length;
+        let danger = 0, any = 0;
+        for (let r = 0; r < NB; r++) for (let c = 0; c < NB; c++) if (b[r][c] && b[r][c].p !== p) for (const j of jumpsOf(r, c)) { any++; if (j.cap[0] === m.tr && j.cap[1] === m.tc) danger = 1; }
         v -= danger * (pc.k ? 9 : 7) + (any && !danger ? 2 : 0);
       } else v += 3;
       b = save; chain = sc; return v;
@@ -3421,14 +3867,21 @@ registerGame({
         sel = { r: best.fr, c: best.fc }; cr = best.tr; cc = best.tc; doMove(best); return null;
       },
       reset(r) {
-        b = Array.from({ length: 8 }, () => Array(8).fill(null));
-        for (let rr = 0; rr < 8; rr++) for (let c = 0; c < 8; c++) if ((rr + c) % 2) { if (rr < 3) b[rr][c] = { p: 1, k: false }; else if (rr > 4) b[rr][c] = { p: 0, k: false }; }
-        turn = r % 2; sel = null; chain = null; over = false; endT = 0; winner = -1; quiet = 0; cr = 5; cc = 0; api.turn(turn); focus();
+        b = Array.from({ length: NB }, () => Array(NB).fill(null)); out = Array(n).fill(false);
+        const put = (rr, c, p) => { if ((rr + c) % 2) b[rr][c] = { p, k: false }; };
+        if (n <= 2) { for (let rr = 0; rr < 8; rr++) for (let c = 0; c < 8; c++) { if (rr < 3) put(rr, c, 1); else if (rr > 4) put(rr, c, 0); } }
+        else {
+          const lo = 3, hi = NB - 4;
+          for (let k = 0; k < 3; k++) for (let x = lo; x <= hi; x++) {
+            put(NB - 1 - k, x, 0); put(k, x, 1); if (n > 2) put(x, k, 2); if (n > 3) put(x, NB - 1 - k, 3);
+          }
+        }
+        turn = r % n; sel = null; chain = null; over = false; endT = 0; winner = -1; quiet = 0; cr = NB - 3; cc = 0; api.turn(turn); focus();
       },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, winner >= 0 ? (count(1 - winner) ? 'No legal moves left.' : 'All pieces captured.') : 'Eighty quiet moves. Drawn.'); return; }
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, winner >= 0 ? (quiet < 0 ? 'Too many quiet moves. Most pieces wins.' : alive().length === 1 ? 'Last player standing.' : 'No legal moves left.') : 'Level on pieces. Drawn.'); return; }
         const s = api.input(turn), [dx, dy] = rep(s, dt);
-        cc = clamp(cc + dx, 0, 7); cr = clamp(cr + dy, 0, 7);
+        cc = clamp(cc + dx, 0, NB - 1); cr = clamp(cr + dy, 0, NB - 1);
         if (s.pb && !chain) sel = null; if (s.pa) press(cr, cc);
       },
       pointer(x, y, t) {
@@ -3437,24 +3890,25 @@ registerGame({
       },
       draw(g) {
         const ms = over ? [] : allMoves(turn), forced = ms.length && ms[0].cap && !sel;
-        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Draw') : api.players[turn].name + (chain ? ' keeps jumping' : "'s turn"), W / 2, 30, 34, over ? SCR.fg : col(turn));
-        for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { g.fillStyle = (r + c) % 2 ? '#1A2D3F' : '#2F4C66'; g.fillRect(X0 + c * C, Y0 + r * C, C, C); }
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Draw') : api.players[turn].name + (chain ? ' keeps jumping' : "'s turn"), W / 2, n > 2 ? 28 : 30, n > 2 ? 26 : 34, over ? SCR.fg : col(turn));
+        for (let r = 0; r < NB; r++) for (let c = 0; c < NB; c++) { g.fillStyle = (r + c) % 2 ? '#1A2D3F' : '#2F4C66'; g.fillRect(X0 + c * C, Y0 + r * C, C, C); }
         g.strokeStyle = SCR.soft; g.lineWidth = 3; g.strokeRect(X0 - 1.5, Y0 - 1.5, B + 3, B + 3);
         const pulse = .5 + Math.sin(performance.now() / 220) * .25;
-        for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+        for (let r = 0; r < NB; r++) for (let c = 0; c < NB; c++) {
           const pc = b[r][c]; if (!pc) continue; const x = X0 + c * C + C / 2, y = Y0 + r * C + C / 2;
-          D.disc(g, x + 2, y + 4, 25, 'rgba(0,0,0,.35)'); D.disc(g, x, y, 25, col(pc.p));
-          g.strokeStyle = 'rgba(15,25,35,.35)'; g.lineWidth = 3; g.beginPath(); g.arc(x, y, 17, 0, TAU); g.stroke();
-          if (pc.k) D.text(g, 'K', x, y + 1, 24, SCR.bg);
-          if (!over && !sel && pc.p === turn && ms.some(m => m.fr === r && m.fc === c)) { g.globalAlpha = pulse; g.strokeStyle = SCR.fg; g.lineWidth = 3; g.beginPath(); g.arc(x, y, 30, 0, TAU); g.stroke(); g.globalAlpha = 1; }
+          D.disc(g, x + 2, y + 3, R, 'rgba(0,0,0,.35)'); D.disc(g, x, y, R, col(pc.p));
+          g.strokeStyle = 'rgba(15,25,35,.35)'; g.lineWidth = 3; g.beginPath(); g.arc(x, y, R * .68, 0, TAU); g.stroke();
+          if (pc.k) D.text(g, 'K', x, y + 1, Math.round(R * .96), SCR.bg);
+          if (!over && !sel && pc.p === turn && ms.some(m => m.fr === r && m.fc === c)) { g.globalAlpha = pulse; g.strokeStyle = SCR.fg; g.lineWidth = 3; g.beginPath(); g.arc(x, y, R + 5, 0, TAU); g.stroke(); g.globalAlpha = 1; }
         }
         if (sel) {
           g.strokeStyle = SCR.fg; g.lineWidth = 4; g.strokeRect(X0 + sel.c * C + 3, Y0 + sel.r * C + 3, C - 6, C - 6);
-          ms.filter(m => m.fr === sel.r && m.fc === sel.c).forEach(m => D.disc(g, X0 + m.tc * C + C / 2, Y0 + m.tr * C + C / 2, 11, col(turn)));
+          ms.filter(m => m.fr === sel.r && m.fc === sel.c).forEach(m => D.disc(g, X0 + m.tc * C + C / 2, Y0 + m.tr * C + C / 2, Math.max(7, R * .45), col(turn)));
         }
-        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([9, 7]); D.rr(g, X0 + cc * C + 5, Y0 + cr * C + 5, C - 10, C - 10, 8); g.stroke(); g.setLineDash([]); }
-        if (forced) D.text(g, 'Capture is mandatory', W / 2, Y0 + B + 20, 18, SCR.dim, 'center', 600);
-        for (const [i, x] of [[0, 112], [1, W - 112]]) { D.text(g, api.players[i].name, x, 200, 22, col(i)); D.text(g, count(i), x, 270, 76, col(i)); D.text(g, 'pieces', x, 322, 16, SCR.dim, 'center', 600); }
+        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([9, 7]); D.rr(g, X0 + cc * C + 3, Y0 + cr * C + 3, C - 6, C - 6, 8); g.stroke(); g.setLineDash([]); }
+        if (forced) D.text(g, 'Capture is mandatory', W / 2, Y0 + B + 16, 16, SCR.dim, 'center', 600);
+        const pos = n > 2 ? [[0, 100, 130], [1, W - 100, 130], [2, 100, 330], [3, W - 100, 330]] : [[0, 112, 200], [1, W - 112, 200]];
+        for (const [i, x, y] of pos) { if (i >= n) continue; D.text(g, api.players[i].name, x, y, 20, out[i] ? SCR.dim : col(i)); D.text(g, count(i), x, y + 60, n > 2 ? 56 : 76, out[i] ? SCR.dim : col(i)); D.text(g, out[i] ? 'out' : 'pieces', x, y + (n > 2 ? 102 : 122), 16, SCR.dim, 'center', 600); }
       }
     };
   }
@@ -3463,8 +3917,8 @@ registerGame({
 /* ---------- Gomoku ---------- */
 registerGame({
   id: 'gomoku', cpu: true, title: 'Gomoku', blurb: 'Five in a row wins. Simple rules, long fights.',
-  kind: 'turns', min: 2, max: 2, color: 2,
-  help: 'Move the cursor (hold to glide) and press A to place a stone. First to line up five or more in any direction wins.',
+  kind: 'turns', min: 2, max: 4, color: 2,
+  help: 'More players means a bigger board: 15 by 15 for three, 17 by 17 for four, and a shorter line to win. Move the cursor (hold to glide) and press A to place a stone. First to line up five wins (four with three players, three with four) in any direction wins.',
   icon() {
     let s = '<g stroke="#0F1923" stroke-width="2.5" opacity=".6">';
     for (let i = 0; i < 6; i++) s += `<path d="M${50 + i * 20} 16V112M40 ${26 + i * 17}H160"/>`;
@@ -3474,13 +3928,13 @@ registerGame({
     return `<svg viewBox="0 0 200 125">${s}</svg>`;
   },
   create(api) {
-    const N = 13, S = 38, X0 = (W - (N - 1) * S) / 2, Y0 = 100, col = i => api.players[i].color;
+    const n = api.n, N = n > 3 ? 17 : n > 2 ? 15 : 13, S = n > 3 ? 29 : n > 2 ? 33 : 38, M = N >> 1, X0 = (W - (N - 1) * S) / 2, Y0 = 100, col = i => api.players[i].color, SR = Math.round(S * .42), K = n > 3 ? 3 : n > 2 ? 4 : 5;
     let b, turn, cx, cy, over, endT, win, last, placed, rep = repeater();
     function check(x, y, p) {
       for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
         const cells = [[x, y]];
         for (const sg of [1, -1]) { let xx = x + dx * sg, yy = y + dy * sg; while (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] === p) { cells.push([xx, yy]); xx += dx * sg; yy += dy * sg; } }
-        if (cells.length >= 5) return cells;
+        if (cells.length >= K) return cells;
       }
       return null;
     }
@@ -3490,28 +3944,28 @@ registerGame({
       const w = check(x, y, turn);
       if (w) { win = w; over = true; endT = 1.2; api.beep('win'); }
       else if (placed === N * N) { over = true; endT = 1; }
-      else { turn = 1 - turn; api.turn(turn); }
+      else { turn = (turn + 1) % n; api.turn(turn); }
     }
     function lineScore(x, y, p) {
       let tot = 0;
       for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
         let cnt = 1, open = 0;
         for (const sg of [1, -1]) { let xx = x + dx * sg, yy = y + dy * sg; while (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] === p) { cnt++; xx += dx * sg; yy += dy * sg; } if (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] === -1) open++; }
-        tot += cnt >= 5 ? 100000 : cnt === 4 ? (open === 2 ? 9000 : open ? 1200 : 0) : cnt === 3 ? (open === 2 ? 700 : open ? 60 : 0) : cnt === 2 ? (open === 2 ? 50 : open ? 8 : 0) : (open ? 2 : 0);
+        cnt += 5 - K; tot += cnt >= 5 ? 100000 : cnt === 4 ? (open === 2 ? 9000 : open ? 1200 : 0) : cnt === 3 ? (open === 2 ? 700 : open ? 60 : 0) : cnt === 2 ? (open === 2 ? 50 : open ? 8 : 0) : (open ? 2 : 0);
       }
       return tot;
     }
     function pickCell() {
-      if (placed === 0) return [6, 6];
+      if (placed === 0) return [M, M];
       const L = api.cpu; let best = null, bs = -1;
       for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
         if (b[y][x] !== -1) continue; let near = false;
         for (let dy = -2; dy <= 2 && !near; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < N && yy < N && b[yy][xx] !== -1) { near = true; break; } }
         if (!near) continue;
-        const v = lineScore(x, y, turn) * (L ? 1.05 : .8) + lineScore(x, y, 1 - turn) * (L === 0 ? .6 : 1) + rand(0, [900, 20, 2][L]) - Math.hypot(x - 6, y - 6) * .1;
+        const v = lineScore(x, y, turn) * (L ? (n > 3 ? 3 : n > 2 ? 1.6 : 1.05) : .8) + Math.max(0, ...Array.from({ length: n }, (_, q) => q === turn ? 0 : (() => { const z = lineScore(x, y, q); return z; })())) * (L === 0 ? .6 : 1) + rand(0, [900, 20, 2][L]) - Math.hypot(x - M, y - M) * .1;
         if (v > bs) { bs = v; best = [x, y]; }
       }
-      return best || [6, 6];
+      return best || [M, M];
     }
     return {
       ai(i, dt) {
@@ -3519,9 +3973,9 @@ registerGame({
         Z[i] = (Z[i] == null ? rand(.4, .9) : Z[i]) - dt; if (Z[i] > 0) return null; Z[i] = null;
         const [x, y] = pickCell(); cx = x; cy = y; place(x, y); return null;
       },
-      reset(r) { b = Array.from({ length: N }, () => Array(N).fill(-1)); turn = r % 2; cx = 6; cy = 6; over = false; endT = 0; win = null; last = null; placed = 0; api.turn(turn); },
+      reset(r) { b = Array.from({ length: N }, () => Array(N).fill(-1)); turn = r % n; cx = M; cy = M; over = false; endT = 0; win = null; last = null; placed = 0; api.turn(turn); },
       update(dt) {
-        if (over) { endT -= dt; if (endT <= 0) api.endRound(win ? b[win[0][1]][win[0][0]] : -1, win ? 'Five in a row.' : 'The board is full.'); return; }
+        if (over) { endT -= dt; if (endT <= 0) api.endRound(win ? b[win[0][1]][win[0][0]] : -1, win ? ['Three', 'Four', 'Five'][K - 3] + ' in a row.' : 'The board is full.'); return; }
         const s = api.input(turn), [dx, dy] = rep(s, dt);
         cx = clamp(cx + dx, 0, N - 1); cy = clamp(cy + dy, 0, N - 1); if (s.pa) place(cx, cy);
       },
@@ -3535,14 +3989,14 @@ registerGame({
         const P = 26; g.fillStyle = '#1B2E40'; D.rr(g, X0 - P, Y0 - P, (N - 1) * S + P * 2, (N - 1) * S + P * 2, 14); g.fill();
         g.strokeStyle = SCR.soft; g.lineWidth = 2; g.beginPath();
         for (let i = 0; i < N; i++) { g.moveTo(X0 + i * S, Y0); g.lineTo(X0 + i * S, Y0 + (N - 1) * S); g.moveTo(X0, Y0 + i * S); g.lineTo(X0 + (N - 1) * S, Y0 + i * S); } g.stroke();
-        [[3, 3], [9, 3], [3, 9], [9, 9], [6, 6]].forEach(([a, c]) => D.disc(g, X0 + a * S, Y0 + c * S, 4, SCR.soft));
+        [[3, 3], [N - 4, 3], [3, N - 4], [N - 4, N - 4], [M, M]].forEach(([a, c]) => D.disc(g, X0 + a * S, Y0 + c * S, 4, SCR.soft));
         for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
           if (b[y][x] < 0) continue; const px = X0 + x * S, py = Y0 + y * S;
-          D.disc(g, px + 1.5, py + 3, 16, 'rgba(0,0,0,.3)'); D.disc(g, px, py, 16, col(b[y][x])); D.disc(g, px - 5, py - 6, 5, 'rgba(255,255,255,.22)');
+          D.disc(g, px + 1.5, py + 3, SR, 'rgba(0,0,0,.3)'); D.disc(g, px, py, SR, col(b[y][x])); D.disc(g, px - SR * .3, py - SR * .38, SR * .3, 'rgba(255,255,255,.22)');
         }
         if (last && !win) { g.strokeStyle = SCR.bg; g.lineWidth = 3; g.beginPath(); g.arc(X0 + last[0] * S, Y0 + last[1] * S, 7, 0, TAU); g.stroke(); }
-        if (win) { g.strokeStyle = SCR.fg; g.lineWidth = 4; win.forEach(([x, y]) => { g.beginPath(); g.arc(X0 + x * S, Y0 + y * S, 21, 0, TAU); g.stroke(); }); }
-        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([8, 6]); g.beginPath(); g.arc(X0 + cx * S, Y0 + cy * S, 20, 0, TAU); g.stroke(); g.setLineDash([]); }
+        if (win) { g.strokeStyle = SCR.fg; g.lineWidth = 4; win.forEach(([x, y]) => { g.beginPath(); g.arc(X0 + x * S, Y0 + y * S, SR + 5, 0, TAU); g.stroke(); }); }
+        if (!over) { g.strokeStyle = col(turn); g.lineWidth = 4; g.setLineDash([8, 6]); g.beginPath(); g.arc(X0 + cx * S, Y0 + cy * S, SR + 4, 0, TAU); g.stroke(); g.setLineDash([]); }
       }
     };
   }
@@ -3929,7 +4383,7 @@ registerGame({
         for (let i = 0; i < n; i++) if (cars[i].alive) for (let j = i + 1; j < n; j++) if (cars[j].alive) {
           const a = cars[i], b = cars[j], rv = Math.hypot(b.vx - a.vx, b.vy - a.vy), dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
           if (bumpBalls(a, b, CR, .6)) {
-            const na = (a.vx * dx + a.vy * dy) / d, nb = (b.vx * dx + b.vy * dy) / d, dmg = Math.min(30, rv * .05);
+            const na = (a.vx * dx + a.vy * dy) / d, nb = (b.vx * dx + b.vy * dy) / d, dmg = Math.min(16, rv * .024);
             if (dmg > .5) { const atkA = na > nb; a.hp -= dmg * (atkA ? .5 : 1); b.hp -= dmg * (atkA ? 1 : .5); api.beep('hit'); for (let k = 0; k < 6; k++) sparks.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, vx: irand(-180, 180), vy: irand(-180, 180), t: 0 }); }
           }
         }
@@ -4267,9 +4721,9 @@ registerGame({
 
 /* ---------- Battleship ---------- */
 registerGame({
-  id: 'battleship', cpu: true, title: 'Battleship', blurb: 'Hunt the hidden fleet across the sea. A hit means you fire again.',
+  id: 'battleship', cpu: true, title: 'Battleship', blurb: 'Hunt the hidden fleet across the sea. Players take turns, one shot each.',
   kind: 'turns', min: 2, max: 2, color: 1,
-  help: 'Tap a square in the enemy waters to fire. A hit lets you shoot again, a miss passes the turn. Sink all five ships first. Ships are placed in secret.',
+  help: 'Tap a square in the enemy waters to fire. You and your rival take turns, one shot each. Sink all five ships first. Ships are placed in secret.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M30 74h140l-18 22H52z" fill="#0F1923"/><path d="M80 74V50h40v24M96 50V34h8v16"/><path d="M14 108c14-8 26 8 40 0s26 8 40 0 26 8 40 0 26 8 40 0"/></svg>`;
   },
@@ -4295,8 +4749,9 @@ registerGame({
       if (id >= 0) {
         const sh = fleet[e].ships[id]; sh.hit++; shots[t][r][c] = 2; fx.push({ r, c, t: 0, k: 'hit', by: t }); api.beep('hit');
         if (sh.hit >= sh.len) { sh.sunk = true; sh.cells.forEach(([rr, cc]) => { shots[t][rr][cc] = 3; }); msg = api.players[t].name + ' sank the ' + NAMES[id] + '!'; api.beep('win'); }
-        else msg = 'Hit! Fire again.';
+        else msg = 'Hit!';
         if (fleet[e].ships.every(s => s.sunk)) { over = true; endT = 1.6; winner = t; msg = api.players[t].name + ' sank the whole fleet!'; }
+        else { turn = e; api.turn(turn); cx = 4; cy = 4; }
         return true;
       }
       shots[t][r][c] = 1; fx.push({ r, c, t: 0, k: 'miss', by: t }); api.beep('wall'); msg = 'Splash. A miss.'; turn = e; api.turn(turn); cx = 4; cy = 4; return true;
@@ -5194,18 +5649,18 @@ registerGame({
 
 /* ---------- Bowling ---------- */
 registerGame({
-  id: 'bowling', cpu: true, title: 'Bowling', blurb: 'Swipe to roll the ball down the lane. Five frames each, strikes pay a bonus.',
+  id: 'bowling', cpu: true, title: 'Bowling', blurb: 'Swipe to roll the ball down the lane. Ten frames, real strike and spare scoring.',
   kind: 'turns', min: 2, max: 4, color: 1,
-  help: 'Swipe up the lane from the ball: the direction aims it and a quicker flick rolls it harder. On a pad or keys, left and right aim, hold A to charge and let go to roll. Two rolls a frame, five frames. Every pin is a point, a strike adds 4 and a spare adds 2.',
+  help: 'Swipe up the lane from the ball: the direction aims it and a quicker flick rolls it harder. On a pad or keys, left and right aim, hold A to charge and let go to roll. Official ten-pin scoring over ten frames: two rolls a frame. A strike (all ten on the first roll) scores 10 plus your next two rolls. A spare (all ten in two rolls) scores 10 plus your next roll. The tenth frame gives bonus rolls after a strike or spare. A perfect game is 300.',
   touch: 'Swipe up the lane to roll the ball.',
   icon() {
     let s = ''; [[100, 30], [88, 48], [112, 48], [76, 66], [100, 66], [124, 66]].forEach(([x, y]) => { s += `<path d="M${x} ${y - 8}c8 0 8 12 4 18l3 12h-14l3-12c-4-6-4-18 4-18z" fill="#0F1923"/>`; });
     return `<svg viewBox="0 0 200 125">${s}<circle cx="100" cy="106" r="12" fill="none" stroke="#0F1923" stroke-width="5"/></svg>`;
   },
   create(api) {
-    const n = api.n, FR = 5, LX0 = 345, LX1 = 615, LY0 = 80, LY1 = 570, BR = 15, PRr = 11, BX = 480, BY = 530, col = i => api.players[i].color;
+    const n = api.n, FR = 10, LX0 = 345, LX1 = 615, LY0 = 80, LY1 = 570, BR = 15, PRr = 11, BX = 480, BY = 530, col = i => api.players[i].color;
     const HOME = []; for (let r = 0; r < 4; r++) for (let i = 0; i <= r; i++) HOME.push([480 + (i - r / 2) * 31, 230 - r * 28]);
-    let pins, ball, turn, frame, roll, phase, score, marks, over, endT, winner, aim = makeAimer(), sw = { on: false, pts: [] }, t, pt, note, noteT, firstDown, fr;
+    let pins, ball, turn, frame, roll, phase, score, rolls, over, endT, winner, aim = makeAimer(), sw = { on: false, pts: [] }, t, pt, note, noteT, stand0, fr;
     const lim = a => clamp(a, -Math.PI / 2 - .3, -Math.PI / 2 + .3), spd = f => 380 + f * 760;
     const down = () => pins.filter(p => p.dn).length;
     function bump(a, b, ra, rb, ma, mb, rest) {
@@ -5231,17 +5686,46 @@ registerGame({
       return P.filter(p => p.dn).length;
     }
     function rack(full) { pins = HOME.map(h => ({ x: h[0], y: h[1], hx: h[0], hy: h[1], vx: 0, vy: 0, dn: false, gone: false })); if (!full) return; }
-    function throwIt(a, f) { if (phase !== 'aim' || over) return; ball = { x: BX, y: BY, vx: Math.cos(a) * spd(f), vy: Math.sin(a) * spd(f), on: true, gut: false }; phase = 'roll'; pt = 0; api.beep('shot'); }
-    function endRoll() {
-      const total = down(), before = firstDown >= 0 ? firstDown : 0; let gain = total - before; const strike = roll === 0 && total === 10, spare = roll === 1 && total === 10;
-      marks[turn][frame][roll] = gain; score[turn] += gain + (strike ? 4 : spare ? 2 : 0);
-      note = strike ? 'STRIKE' : spare ? 'Spare' : gain === 0 ? 'Gutter' : gain + ' down'; noteT = 1.1; api.beep(strike ? 'win' : gain ? 'place' : 'no');
-      if (roll === 0 && !strike) { roll = 1; firstDown = total; pins = pins.filter(p => !p.dn).map(p => (p.x = p.hx, p.y = p.hy, p.vx = p.vy = 0, p)); phase = 'next'; pt = 1.1; }
-      else {
-        roll = 0; firstDown = -1; phase = 'next'; pt = 1.2; rack(true);
-        turn++; if (turn >= n) { turn = 0; frame++; }
-        if (frame >= FR) { over = true; endT = 1.3; const m = Math.max(...score), w = score.map((v, i) => v === m ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; phase = 'done'; }
+    function throwIt(a, f) { if (phase !== 'aim' || over) return; stand0 = pins.filter(p => !p.gone).length; ball = { x: BX, y: BY, vx: Math.cos(a) * spd(f), vy: Math.sin(a) * spd(f), on: true, gut: false }; phase = 'roll'; pt = 0; api.beep('shot'); }
+    /* official ten-pin scoring: for each of the ten frames, the marks to show and the running total (null while it still waits on bonus rolls) */
+    function frames(rs) {
+      const out = []; let idx = 0, run = 0, known = true;
+      const mk = (v, prev) => v === undefined ? '' : (prev !== undefined && prev < 10 && prev + v === 10) ? '/' : v === 10 ? 'X' : v === 0 ? '-' : String(v);
+      for (let f = 0; f < 10; f++) {
+        const a = rs[idx], b = rs[idx + 1], c = rs[idx + 2]; let marks = [], pts = null;
+        if (f < 9) {
+          if (a === 10) { marks = ['X']; if (b !== undefined && c !== undefined) pts = 10 + b + c; idx += 1; }
+          else if (a !== undefined) { marks = [mk(a), mk(b, a)]; if (b !== undefined) { if (a + b < 10) pts = a + b; else if (c !== undefined) pts = 10 + c; } idx += 2; }
+        } else if (a !== undefined) {
+          marks = [mk(a), a === 10 ? mk(b) : mk(b, a), c === undefined ? '' : (a === 10 && b !== 10 ? mk(c, b) : mk(c))];
+          const need = (a === 10 || (b !== undefined && a + b === 10)) ? 3 : 2, have = [a, b, c].filter(v => v !== undefined).length;
+          if (have >= need) pts = a + (b || 0) + (c || 0);
+        }
+        if (pts === null) known = false; else if (known) run += pts;
+        out.push({ m: marks, t: pts !== null && known ? run : null });
       }
+      return out;
+    }
+    const cumul = rs => { const f = frames(rs); let best = 0; for (const x of f) if (x.t !== null) best = x.t; return best; };
+    function nextRack(full) { if (full) rack(true); else pins = pins.filter(p => !p.dn).map(p => (p.x = p.hx, p.y = p.hy, p.vx = p.vy = 0, p)); }
+    function endRoll() {
+      const gain = down(), rs = rolls[turn], all = gain === stand0; rs.push(gain);
+      const last = frame === FR - 1, strike = roll === 0 && all, spare = roll > 0 && all && stand0 < 10 || (last && roll === 1 && rs[rs.length - 2] + gain === 10 && rs[rs.length - 2] < 10);
+      note = strike ? 'STRIKE' : spare ? 'Spare' : gain === 0 ? 'Gutter' : gain + ' down'; noteT = 1.1; api.beep(strike ? 'win' : gain ? 'place' : 'no');
+      let frameDone = false, fresh = false;
+      if (!last) { if (roll === 0 && !all) { roll = 1; } else frameDone = true; fresh = frameDone; }
+      else {
+        const f0 = rs.length - (roll + 1), a = rs[f0], b = rs[f0 + 1];
+        if (roll === 0) { roll = 1; fresh = all; }
+        else if (roll === 1) { if (a === 10 || a + b === 10) { roll = 2; fresh = a === 10 ? b === 10 : true; } else frameDone = true; }
+        else frameDone = true;
+      }
+      score[turn] = cumul(rs);
+      phase = 'next'; pt = 1.2;
+      if (frameDone) {
+        roll = 0; nextRack(true); turn++; if (turn >= n) { turn = 0; frame++; }
+        if (frame >= FR) { over = true; endT = 1.3; const m = Math.max(...score), w = score.map((v, i) => v === m ? i : -1).filter(i => i >= 0); winner = w.length === 1 ? w[0] : -1; phase = 'done'; }
+      } else nextRack(fresh);
     }
     return {
       ai(i, dt) {
@@ -5250,7 +5734,7 @@ registerGame({
         if (!Z[i]) {
           let best = null, bs = -1; const tries = L === 0 ? 6 : L === 1 ? 14 : 24;
           for (let k = 0; k < tries; k++) { const a = L === 0 ? -Math.PI / 2 + rand(-.25, .25) : -Math.PI / 2 - .26 + k * (.52 / (tries - 1)); for (const f of [.55, .85]) { const v = simBall(a, f) + rand(0, .6); if (v > bs) { bs = v; best = [a, f]; } } }
-          Z[i] = { a: lim(best[0] + rand(-1, 1) * [.04, .012, .003][L]), f: clamp(best[1] + rand(-1, 1) * [.1, .04, .01][L], .3, 1), w: rand(.5, 1.1), st: 0 };
+          Z[i] = { a: lim(best[0] + rand(-1, 1) * [.24, .16, .12][L]), f: clamp(best[1] + rand(-1, 1) * [.2, .1, .05][L], .3, 1), w: rand(.5, 1.1), st: 0 };
         }
         return aimDrive(Z[i], aim, dt);
       },
@@ -5264,7 +5748,7 @@ registerGame({
         if (len < 28 || dy > -10) { api.beep('no'); return; }
         throwIt(lim(Math.atan2(dy, dx)), clamp((len / dtt - 300) / 1400, .25, 1));
       },
-      reset(r) { rack(true); ball = { x: BX, y: BY, vx: 0, vy: 0, on: false, gut: false }; turn = r % n; frame = 0; roll = 0; phase = 'aim'; score = Array(n).fill(0); marks = Array.from({ length: n }, () => Array.from({ length: FR }, () => [null, null])); over = false; endT = 0; winner = -1; aim.reset(-Math.PI / 2); t = 0; pt = 0; note = ''; noteT = 0; firstDown = -1; sw = { on: false, pts: [] }; api.turn(turn); },
+      reset(r) { rack(true); ball = { x: BX, y: BY, vx: 0, vy: 0, on: false, gut: false }; turn = r % n; frame = 0; roll = 0; phase = 'aim'; score = Array(n).fill(0); rolls = Array.from({ length: n }, () => []); over = false; endT = 0; winner = -1; aim.reset(-Math.PI / 2); t = 0; pt = 0; note = ''; noteT = 0; stand0 = 10; sw = { on: false, pts: [] }; api.turn(turn); },
       update(dt) {
         t += dt; noteT -= dt;
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, `${score.join(' to ')} points.`); return; }
@@ -5285,12 +5769,19 @@ registerGame({
         if (ball.on || phase === 'aim' || phase === 'next') { D.disc(g, ball.x + 3, ball.y + 4, BR, 'rgba(0,0,0,.3)'); D.disc(g, ball.x, ball.y, BR, over ? '#555' : col(turn)); D.disc(g, ball.x - 5, ball.y - 5, 4, 'rgba(255,255,255,.4)'); D.disc(g, ball.x + 2, ball.y + 3, 2, '#10161C'); D.disc(g, ball.x + 6, ball.y + 1, 2, '#10161C'); }
         if (phase === 'aim' && !over && !sw.on) D.text(g, 'Swipe up the lane', 480, 568, 16, SCR.dim, 'center', 600);
         if (phase === 'aim' && !over) powerBar(g, W / 2 - 80, 586, 160, aim.pow, col(turn));
-        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Dead level') : api.players[turn].name + (roll ? ' · second roll' : ' · frame ' + (frame + 1) + ' of ' + FR), W / 2, 36, 30, over ? SCR.fg : col(turn));
+        D.text(g, over ? (winner >= 0 ? api.players[winner].name + ' wins' : 'Dead level') : api.players[turn].name + (roll ? ' · roll ' + (roll + 1) + ' of frame ' + (frame + 1) : ' · frame ' + (frame + 1) + ' of ' + FR), W / 2, 36, 30, over ? SCR.fg : col(turn));
         if (noteT > 0) D.text(g, note, W / 2, 330, 54, '#FFC933');
         for (let i = 0; i < n; i++) {
-          const left = i % 2 === 0, x0 = left ? 24 : W - 300, y0 = 96 + Math.floor(i / 2) * 210, cw = 56;
-          D.text(g, api.players[i].name, x0, y0, 18, col(i), 'left'); D.text(g, score[i], x0 + 270, y0, 26, col(i), 'right');
-          for (let f = 0; f < FR; f++) { const x = x0 + f * cw, cur = i === turn && f === frame && !over; g.strokeStyle = cur ? col(i) : '#2A3E50'; g.lineWidth = cur ? 3 : 2; D.rr(g, x, y0 + 16, cw - 4, 48, 6); g.stroke(); const m = marks[i][f]; D.text(g, m[0] == null ? '' : (m[0] === 10 ? 'X' : m[0]), x + 14, y0 + 30, 15, SCR.fg, 'center', 700); D.text(g, m[1] == null ? '' : (m[0] + m[1] === 10 ? '/' : m[1]), x + 38, y0 + 30, 15, SCR.fg, 'center', 700); }
+          const left = i % 2 === 0, x0 = left ? 14 : W - 14 - 5 * 59, y0 = 78 + Math.floor(i / 2) * 250, cw = 59, fs = frames(rolls[i]);
+          D.text(g, api.players[i].name, x0, y0, 17, col(i), 'left'); D.text(g, score[i], x0 + 5 * cw - 4, y0, 26, col(i), 'right');
+          for (let f = 0; f < FR; f++) {
+            const x = x0 + (f % 5) * cw, y = y0 + 14 + Math.floor(f / 5) * 70, cur = i === turn && f === frame && !over, F = fs[f];
+            g.strokeStyle = cur ? col(i) : '#2A3E50'; g.lineWidth = cur ? 3 : 2; D.rr(g, x, y, cw - 4, 62, 6); g.stroke();
+            const nb = f === 9 ? 3 : 2, bw = (cw - 4) / nb;
+            for (let k = 0; k < nb; k++) { if (k > 0) { g.strokeStyle = '#2A3E50'; g.lineWidth = 1; g.beginPath(); g.moveTo(x + k * bw, y); g.lineTo(x + k * bw, y + 24); g.stroke(); } D.text(g, F.m[k] || '', x + k * bw + bw / 2, y + 13, 14, SCR.fg, 'center', 700); }
+            g.strokeStyle = '#2A3E50'; g.lineWidth = 1; g.beginPath(); g.moveTo(x, y + 24); g.lineTo(x + cw - 4, y + 24); g.stroke();
+            D.text(g, F.t === null || F.t === undefined ? '' : F.t, x + (cw - 4) / 2, y + 44, 20, col(i), 'center', 700);
+          }
         }
       }
     };
@@ -5424,12 +5915,11 @@ registerGame({
 registerGame({
   id: 'tabletennis', cpu: true, title: 'Table Tennis', blurb: 'Side-on ping pong. Slide to the ball, swing on time and keep it on the table.',
   kind: 'live', min: 2, max: 2, color: 2,
-  help: 'Slide left and right to get under the ball and press A to swing (a late swing smashes harder; leaning toward the net adds power, leaning back drops it short). The ball must bounce once on your side before you hit it. Clip the net or miss the table and the point is lost. First to seven.',
-  touch: 'Drag left and right to move, tap to swing.',
-  tapA: true,
+  help: 'Slide left and right to get under the ball and press A to swing (a late swing smashes harder; leaning toward the net adds power, leaning back drops it short). The ball must bounce once on your side before you hit it. Clip the net or miss the table and the point is lost. First to 11, win by two; serve changes every two points (every point at 10-10).',
+  touch: 'Slide your finger or mouse left and right to move; lift your finger or click to swing.',
   icon() { return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><circle cx="64" cy="48" r="26" fill="#0F1923"/><path d="M64 74v34"/><circle cx="142" cy="40" r="9"/><path d="M22 104h156M100 90v14"/></svg>`; },
   create(api) {
-    const TX0 = 150, TX1 = 810, TY = 400, NET = 480, NH = 46, G = 1050, GOAL = 7, col = i => api.players[i].color;
+    const TX0 = 150, TX1 = 810, TY = 400, NET = 480, NH = 46, G = 1050, GOAL = 11, col = i => api.players[i].color;
     const RNG = [[70, 330], [630, 890]], PY = 60, SW = .26, REACH = 46;
     let rl = 0, px, swing, ball, sv, pts, last, bnc, ph, pt, over, endT, winner, note, noteT, n0, trail;
     const dirOf = i => i === 0 ? 1 : -1;
@@ -5437,7 +5927,7 @@ registerGame({
       rl = 0; px = [200, 760]; swing = [0, 0]; bnc = 0; last = sv; ph = 'serve'; pt = .9; n0 = 0; trail = [];
       ball = { x: px[sv] + dirOf(sv) * 28, h: 80, vx: 0, vh: 0, live: false };
     }
-    function point(w, why) { pts[w]++; note = why; noteT = 1.1; api.beep(w === 0 || true ? 'place' : 'no'); ph = 'res'; pt = 1; if (pts[w] >= GOAL) { over = true; endT = 1; winner = w; api.beep('win'); } else { n0++; if ((pts[0] + pts[1]) % 2 === 0) sv = 1 - sv; } }
+    function point(w, why) { pts[w]++; note = why; noteT = 1.1; api.beep(w === 0 || true ? 'place' : 'no'); ph = 'res'; pt = 1; if (pts[w] >= GOAL && pts[w] - pts[1 - w] >= 2) { over = true; endT = 1; winner = w; api.beep('win'); } else { n0++; const tot = pts[0] + pts[1]; if (tot >= 20 || tot % 2 === 0) sv = 1 - sv; } }
     function hit(i, s, phase) {
       const d = dirOf(i), pw = clamp(phase, 0, 1), lean = clamp(s.x * d, -1, 1);
       rl++; const T0 = clamp(.9 - pw * .42 - lean * .12, .38, 1.1) * Math.max(.62, 1 - rl * .025), tx = NET + d * (95 + pw * 190 + lean * 60 + rand(-14, 14)); const tt = clamp(T0, .35, 1.2);
@@ -5445,7 +5935,8 @@ registerGame({
     }
     function paddlePos(i) { return [px[i] + dirOf(i) * 22, PY + 20]; }
     return {
-      dbg: () => ({ pts, ph, pt, bnc, ball, sv, px }),
+      dragAxes: 'x', dragFire: true, drag: i => ({ x: px[i], y: 0 }),
+      dbg: () => ({ pts, ph, pt, bnc, ball, sv, px, swing }),
       ai(i, dt) {
         const S = this.s || (this.s = []), z = S[i] || (S[i] = { h: false, ct: 0, off: 0 }), L = api.cpu;
         if (over) return null; if (z.h) { z.h = false; return { a: false }; } z.ct -= dt;
@@ -5620,7 +6111,7 @@ for (const key of Object.keys(arenaDefs)) {
       const goalX = t => t === 0 ? FX1 : FX0, dirX = t => t === 0 ? 1 : -1;
       const hoopX = t => t === 0 ? FX1 - 46 : FX0 + 46;
       const mates = i => seatsOf(n).filter(k => k !== i && teamOf(k) === teamOf(i));
-      let pl, ball, sc, t, frz, over, endT, winner, pops, poss, msg, msgT, clk;
+      let pl, ball, sc, t, frz, over, endT, winner, pops, poss, msg, msgT, clk, ot = false;
       const BLK = k => ({ x: 250 + k * 115, y: CY + 150 * Math.sin(clk * .8 + k * 1.7) });
       const hyp = Math.hypot;
       function placeKick(toTeam) {
@@ -5649,7 +6140,7 @@ for (const key of Object.keys(arenaDefs)) {
         sc[tm] += pts; msg = why; msgT = 1.2; api.beep('win'); pops.push({ x: 480, y: 250, t: 1.2, v: '+' + pts, c: tcol(tm) });
         if (sp === 'football') { placeKick(); setPlay(1 - tm, tm === 0 ? FX1 - 170 : FX0 + 170, true); }
         else { kickoff(1 - tm); }
-        frz = 1.3;
+        frz = 1.3; if (ot) { ot = false; t = 0; sc[tm] += 0; finish(); }
       }
       const pickup = (i, p) => { ball.own = i; ball.sh = null; ball.vx = ball.vy = 0; api.beep('place'); if (sp === 'football' && poss !== teamOf(i)) { poss = teamOf(i); msg = 'Turnover'; msgT = .8; } if (sp === 'basketball') poss = teamOf(i); };
       function doPass(i) {
@@ -5718,7 +6209,7 @@ for (const key of Object.keys(arenaDefs)) {
           }
           return out;
         },
-        reset() {
+        reset() { ot = false;
           sc = [0, 0]; t = TIME; over = false; endT = 0; winner = -1; pops = []; msg = ''; msgT = 0; clk = 0; frz = 0;
           placeKick(0);
           if (sp === 'football') setPlay(0, 330, true); else kickoff(0);
@@ -5847,7 +6338,8 @@ for (const key of Object.keys(arenaDefs)) {
         }
       };
       function finish() {
-        over = true; endT = 1.2; winner = sc[0] === sc[1] ? -1 : sc[0] > sc[1] ? 0 : 1; api.beep('win');
+        if (sc[0] === sc[1] && !ot && sp !== 'football') { ot = true; t = 40; frz = 1.4; msg = 'Extra time: next score wins'; msgT = 1.4; kickoff(irand(0, 1)); return; }
+        ot = false; over = true; endT = 1.2; winner = sc[0] === sc[1] ? -1 : sc[0] > sc[1] ? 0 : 1; api.beep('win');
       }
     }
   });
@@ -6044,20 +6536,20 @@ registerGame({
 registerGame({
   id: 'airhockey', cpu: true, title: 'Air Hockey', blurb: 'Slam the puck into the other goal. First to seven.',
   kind: 'live', min: 2, max: 2, color: 1,
-  help: 'Move your paddle with the stick or keys. You cannot cross the centre line. Hit the puck off the paddle edge to change its angle.',
+  help: 'Move your paddle with the stick or keys. You cannot cross the centre line. Hit the puck off the paddle edge to change its angle. After a goal the puck is served to the player who was scored on. First to seven.',
   icon() {
     return `<svg viewBox="0 0 200 125" fill="none" stroke="#0F1923" stroke-width="5"><rect x="22" y="12" width="156" height="101" rx="12"/><path d="M100 12v101" stroke-dasharray="4 8"/><circle cx="100" cy="62" r="16"/><circle cx="58" cy="62" r="14" fill="#0F1923"/><circle cx="142" cy="62" r="14" fill="#0F1923"/><circle cx="108" cy="62" r="6" fill="#0F1923"/></svg>`;
   },
   create(api) {
     const PR = 40, UR = 22, GAP = 230, GOAL = 7, col = i => api.players[i].color, gy0 = (H - GAP) / 2, gy1 = (H + GAP) / 2;
-    let pad, puck, score, serve, over, endT, flash, still = 0;
+    let pad, puck, score, serve, over, endT, flash, still = 0, idle = 0;
     const clampPad = (p, i) => {
       p.x = clamp(p.x, i ? W / 2 + PR + 4 : PR + 14, i ? W - PR - 14 : W / 2 - PR - 4); p.y = clamp(p.y, PR + 14, H - PR - 14);
     };
     function goal(w) {
       score[w]++; api.beep('win'); flash = 0.5;
       if (score[w] >= GOAL) { over = true; endT = 1; }
-      else { serve = 1.1; puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0; }
+      else { serve = 1.1; puck.x = w ? W / 2 - 150 : W / 2 + 150; puck.y = H / 2; puck.vx = 0; puck.vy = 0; }
     }
     return {
       dragAxes: 'xy', drag: i => pad[i], dbg: () => ({ score, puck, pad, serve }),
@@ -6080,7 +6572,7 @@ registerGame({
       },
       update(dt) {
         flash = Math.max(0, flash - dt);
-        if (serve <= 0 && !over) { if (Math.hypot(puck.vx, puck.vy) < 25 && (puck.x < 70 || puck.x > W - 70 || puck.y < 70 || puck.y > H - 70)) { still = (still || 0) + dt; if (still > 2.2) { still = 0; puck.x = W / 2; puck.y = H / 2; puck.vx = puck.vy = 0; serve = .4; } } else still = 0; }
+        if (serve <= 0 && !over) { if (Math.hypot(puck.vx, puck.vy) < 25) { idle = (idle || 0) + dt; if (idle > 7) { idle = 0; puck.x = puck.x < W / 2 ? W / 2 + 150 : W / 2 - 150; puck.y = H / 2; puck.vx = puck.vy = 0; serve = .5; } } else idle = 0; if (Math.hypot(puck.vx, puck.vy) < 25 && (puck.x < 70 || puck.x > W - 70 || puck.y < 70 || puck.y > H - 70)) { still = (still || 0) + dt; if (still > 2.2) { still = 0; puck.x = W / 2; puck.y = H / 2; puck.vx = puck.vy = 0; serve = .4; } } else still = 0; }
         if (over) { endT -= dt; if (endT <= 0) api.endRound(score[0] > score[1] ? 0 : 1, `${score[0]} to ${score[1]}.`); return; }
         pad.forEach((p, i) => {
           const s = api.input(i), ox = p.x, oy = p.y;
@@ -7623,7 +8115,7 @@ registerGame({
 registerGame({
   id: 'yazy', cpu: true, title: 'Yazy', blurb: 'Five dice, three rolls a turn, thirteen boxes to fill. The classic dice game.',
   kind: 'turns', min: 2, max: 2, color: 0,
-  help: 'Tap or press A to roll. Then left/right picks a die and A holds it, B rolls the rest again (up to three rolls). Press down to choose a box, A scores it. Up or B returns to the dice.',
+  help: 'Tap or press A to roll. Then left/right picks a die and A holds it, B rolls the rest again (up to three rolls). Press down to choose a box, A scores it. Up or B returns to the dice. A second five-alike after scoring 50 earns a 100 bonus, and then counts as a joker for the full house and straights.',
   icon() {
     let s = ''; const P = [[[0, 0]], [[-1, -1], [1, 1]], [[-1, -1], [0, 0], [1, 1]]];
     [[28, 20, 0], [76, 44, 1], [122, 26, 2], [60, 78, 1], [112, 80, 0]].forEach(([x, y, f]) => { s += `<rect x="${x}" y="${y}" width="40" height="40" rx="8" fill="none" stroke="#0F1923" stroke-width="5"/>`; P[f].forEach(([a, b]) => { s += `<circle cx="${x + 20 + a * 9}" cy="${y + 20 + b * 9}" r="3.8" fill="#0F1923"/>`; }); });
@@ -7636,13 +8128,14 @@ registerGame({
       const cnt = [0, 0, 0, 0, 0, 0, 0]; d.forEach(v => cnt[v]++); const sum = d.reduce((a, b) => a + b, 0), mx = Math.max(...cnt.slice(1));
       if (cat < 6) return cnt[cat + 1] * (cat + 1);
       if (cat === 6) return mx >= 3 ? sum : 0; if (cat === 7) return mx >= 4 ? sum : 0;
-      if (cat === 8) return cnt.slice(1).includes(3) && cnt.slice(1).includes(2) ? 25 : 0;
+      const jk = mx === 5 && typeof sc !== 'undefined' && sc && sc[turn] && sc[turn][11] !== null && sc[turn][d[0] - 1] !== null;
+      if (cat === 8) return jk || (cnt.slice(1).includes(3) && cnt.slice(1).includes(2)) ? 25 : 0;
       const has = (a, b) => { for (let k = a; k <= b; k++) if (!cnt[k]) return false; return true; };
-      if (cat === 9) return has(1, 4) || has(2, 5) || has(3, 6) ? 30 : 0; if (cat === 10) return has(1, 5) || has(2, 6) ? 40 : 0;
+      if (cat === 9) return jk || has(1, 4) || has(2, 5) || has(3, 6) ? 30 : 0; if (cat === 10) return jk || has(1, 5) || has(2, 6) ? 40 : 0;
       if (cat === 11) return mx === 5 ? 50 : 0; return sum;
     }
-    const upper = s => s.slice(0, 6).reduce((a, v) => a + (v || 0), 0), total = s => s.reduce((a, v) => a + (v || 0), 0) + (upper(s) >= 63 ? 35 : 0);
-    let sc, turn, rolls, dice, held, phase, t, pending, mode, dcur, ccur, over, endT, anim, filled;
+    const upper = s => s.slice(0, 6).reduce((a, v) => a + (v || 0), 0), total = s => s.reduce((a, v) => a + (v || 0), 0) + (upper(s) >= 63 ? 35 : 0) + (ybon[sc.indexOf(s)] || 0);
+    const ybon = [0, 0]; let sc, turn, rolls, dice, held, phase, t, pending, mode, dcur, ccur, over, endT, anim, filled;
     const openCats = () => { const a = []; for (let k = 0; k < 13; k++) if (sc[turn][k] === null) a.push(k); return a; };
     function startRoll() {
       pending = dice.map((v, i) => held[i] && rolls > 0 ? v : irand(1, 6)); rolls++; phase = 'rolling'; t = .55; api.beep('select');
@@ -7666,6 +8159,7 @@ registerGame({
     }
     const TX = 230, C0 = 600, C1 = 730, Y = 192, RH = 24;
     function scoreCat() {
+      if (Math.max(...[1, 2, 3, 4, 5, 6].map(v => dice.filter(x => x === v).length)) === 5 && sc[turn][11] === 50) { ybon[turn] += 100; api.beep('win'); }
       sc[turn][ccur] = score(ccur, dice); api.beep(sc[turn][ccur] ? 'place' : 'no'); filled++;
       held = Array(5).fill(false); rolls = 0;
       if (filled === 26) { phase = 'over'; t = 1.3; } else { turn = 1 - turn; phase = 'roll'; api.turn(turn); }
@@ -7689,7 +8183,7 @@ registerGame({
         for (let k = 0; k < 13; k++) { const yy = Y + k * RH + 8 + (k > 5 ? 22 : 0); if (x >= TX - 12 && x <= C1 + 50 && Math.abs(y - yy) <= 12 && sc[turn][k] === null) { mode = 'cat'; ccur = k; if (t === 'down') scoreCat(); return; } }
       },
       reset(r) {
-        sc = [Array(13).fill(null), Array(13).fill(null)]; turn = r % 2; rolls = 0; dice = [1, 2, 3, 4, 5]; held = Array(5).fill(false); phase = 'roll'; t = 0; mode = 'dice'; dcur = 0; ccur = 0; over = false; endT = 0; anim = 0; filled = 0; api.turn(turn);
+        sc = [Array(13).fill(null), Array(13).fill(null)]; ybon[0] = ybon[1] = 0; turn = r % 2; rolls = 0; dice = [1, 2, 3, 4, 5]; held = Array(5).fill(false); phase = 'roll'; t = 0; mode = 'dice'; dcur = 0; ccur = 0; over = false; endT = 0; anim = 0; filled = 0; api.turn(turn);
       },
       update(dt) {
         anim += dt;
@@ -7736,7 +8230,7 @@ registerGame({
         });
         const yb = Y + 6 * RH + 8 + 11;
         D.text(g, 'Upper bonus (63+)', TX, yb, 14, SCR.dim, 'left', 600);
-        for (let i = 0; i < 2; i++) D.text(g, `${upper(sc[i])}/63${upper(sc[i]) >= 63 ? '  +35' : ''}`, i ? C1 : C0, yb, 14, SCR.dim, 'center', 600);
+        for (let i = 0; i < 2; i++) D.text(g, `${upper(sc[i])}/63${upper(sc[i]) >= 63 ? '  +35' : ''}${ybon[i] ? '  Yazy +' + ybon[i] : ''}`, i ? C1 : C0, yb, 14, SCR.dim, 'center', 600);
         const yt = Y + 13 * RH + 8 + 22 + 10;
         D.text(g, 'Total', TX, yt, 22, SCR.fg, 'left'); for (let i = 0; i < 2; i++) D.text(g, total(sc[i]), i ? C1 : C0, yt, 24, col(i));
         if (phase === 'choose') D.text(g, mode === 'dice' ? (rolls < 3 ? 'Tap dice to hold them, tap Roll again, or tap a box to score' : 'No rolls left. Tap a box to score') : 'Tap a box to score it', W / 2, 578, 15, SCR.dim, 'center', 600);
@@ -7799,13 +8293,13 @@ function powerBar(g, x, y, w, p, c) { g.fillStyle = '#10202E'; D.rr(g, x, y, w, 
 registerGame({
   id: 'pool', cpu: true, title: 'Pool', blurb: 'Eight-ball. Pot your group, then the black. Hold A to power up.',
   kind: 'turns', min: 2, max: 2, color: 2,
-  help: 'Left and right rotate the cue (hold B to fine-tune). Hold A to charge, release to shoot. Pot a ball to claim solids or stripes, clear your group, then pot the 8. A scratch or a missed hit passes the turn.',
+  help: 'Left and right rotate the cue (hold B to fine-tune). Hold A to charge, release to shoot. Pot a ball to claim solids or stripes, clear your group, then pot the 8. The first shot is the break, and the table stays open until someone pots a ball afterwards. Any foul (a scratch, hitting the wrong ball first, or no ball reaching a cushion) gives your rival ball in hand: they place the cue ball anywhere, by moving the mouse or stick and clicking or pressing A. Potting the 8 early or on a foul loses.',
   icon() { return `<svg viewBox="0 0 200 125"><circle cx="70" cy="64" r="30" fill="none" stroke="#0F1923" stroke-width="5"/><circle cx="70" cy="64" r="11" fill="#0F1923"/><circle cx="142" cy="46" r="18" fill="#0F1923"/><circle cx="148" cy="92" r="14" fill="none" stroke="#0F1923" stroke-width="5"/></svg>`; },
   create(api) {
     const X0 = 100, Y0 = 130, TW = 760, TH = 380, R = 12, col = i => api.players[i].color;
     const POCK = [[X0, Y0], [X0 + TW / 2, Y0 - 8], [X0 + TW, Y0], [X0, Y0 + TH], [X0 + TW / 2, Y0 + TH + 8], [X0 + TW, Y0 + TH]];
     const BC = ['#fff', '#F6C11F', '#2B6FE0', '#E03A2E', '#7A3FC9', '#F58220', '#1F9F55', '#8E2B2B', '#10161C'];
-    let simming = false, balls, turn, phase, grp, aim = makeAimer(), potted, firstHit, rollT, over, endT, winner, msg, note, noteT;
+    let simming = false, balls, turn, phase, grp, aim = makeAimer(), potted, firstHit, rollT, over, endT, winner, msg, note, noteT, isBreak = true, railHit = false;
     const own = (i, b) => b.id !== 0 && b.id !== 8 && grp[i] && (grp[i] === 'S') === (b.id < 8);
     const ownLeft = i => balls.filter(b => b.alive && own(i, b)).length;
     function ball(id, x, y) { return { id, x, y, vx: 0, vy: 0, alive: true }; }
@@ -7817,8 +8311,8 @@ registerGame({
           b.x += b.vx * h; b.y += b.vy * h;
           for (const p of POCK) if (Math.hypot(b.x - p[0], b.y - p[1]) < 23) { b.alive = false; potted.push(b.id); if (!simming) api.beep('hit'); break; }
           if (!b.alive) continue;
-          if (b.x < X0 + R) { b.x = X0 + R; b.vx = Math.abs(b.vx) * .8; } if (b.x > X0 + TW - R) { b.x = X0 + TW - R; b.vx = -Math.abs(b.vx) * .8; }
-          if (b.y < Y0 + R) { b.y = Y0 + R; b.vy = Math.abs(b.vy) * .8; } if (b.y > Y0 + TH - R) { b.y = Y0 + TH - R; b.vy = -Math.abs(b.vy) * .8; }
+          if (b.x < X0 + R) { b.x = X0 + R; b.vx = Math.abs(b.vx) * .8; if (firstHit !== -1) railHit = true; } if (b.x > X0 + TW - R) { b.x = X0 + TW - R; b.vx = -Math.abs(b.vx) * .8; if (firstHit !== -1) railHit = true; }
+          if (b.y < Y0 + R) { b.y = Y0 + R; b.vy = Math.abs(b.vy) * .8; if (firstHit !== -1) railHit = true; } if (b.y > Y0 + TH - R) { b.y = Y0 + TH - R; b.vy = -Math.abs(b.vy) * .8; if (firstHit !== -1) railHit = true; }
         }
         for (let i = 0; i < balls.length; i++) if (balls[i].alive) for (let j = i + 1; j < balls.length; j++) if (balls[j].alive) {
           if (bumpBalls(balls[i], balls[j], R, .95)) { if (firstHit === -1 && (balls[i].id === 0 || balls[j].id === 0)) firstHit = balls[i].id === 0 ? balls[j].id : balls[i].id; }
@@ -7827,28 +8321,35 @@ registerGame({
       const f = Math.exp(-.75 * dt);
       for (const b of balls) if (b.alive) { b.vx *= f; b.vy *= f; const sp = Math.hypot(b.vx, b.vy); if (sp < 8) { b.vx = b.vy = 0; } else { const k = Math.max(0, sp - 22 * dt) / sp; b.vx *= k; b.vy *= k; } }
     }
-    function resolve() {
-      const cue = balls[0], scratch = !cue.alive, eight = potted.includes(8);
+function resolve() {
+      const cue = balls[0], scratch = !cue.alive, brk = isBreak; isBreak = false;
+      if (brk && potted.includes(8)) { const e = balls.find(o => o.id === 8); if (e) { e.alive = true; e.x = X0 + TW * .72 + 2 * (R * 1.75 + .5); e.y = Y0 + TH / 2; e.vx = e.vy = 0; } potted = potted.filter(id => id !== 8); }
+      const eight = potted.includes(8);
       const real = potted.filter(id => id > 0 && id !== 8);
-      if (!grp[turn] && real.length && !scratch) { const s = real[0] < 8 ? 'S' : 'T'; grp[turn] = s; grp[1 - turn] = s === 'S' ? 'T' : 'S'; setNote(`${api.players[turn].name} has ${s === 'S' ? 'solids' : 'stripes'}`); }
       const fh = firstHit === -1 ? null : balls.find(b => b.id === firstHit);
-      let foul = scratch || firstHit === -1 || (grp[turn] && fh && ownLeft(turn) > 0 && !own(turn, fh)) || (grp[turn] && fh && fh.id === 8 && ownLeft(turn) > 0);
+      const foul = scratch || firstHit === -1 || (!railHit && potted.length === 0) || (grp[turn] && fh && ownLeft(turn) > 0 && !own(turn, fh)) || (grp[turn] && fh && ownLeft(turn) === 0 && fh.id !== 8) || (!grp[turn] && fh && fh.id === 8);
+      if (!brk && !grp[turn] && real.length && !scratch && !foul) { const s = real[0] < 8 ? 'S' : 'T'; grp[turn] = s; grp[1 - turn] = s === 'S' ? 'T' : 'S'; setNote(`${api.players[turn].name} has ${s === 'S' ? 'solids' : 'stripes'}`); }
       if (eight) {
-        const clear = ownLeft(turn) === 0 && grp[turn] && !real.some(id => !own(turn, { id })) && !scratch;
-        over = true; endT = 1.2; winner = clear ? turn : 1 - turn; msg = clear ? 'Potted the 8 to finish.' : 'The 8 went in too early.'; return;
+        const clear = ownLeft(turn) === 0 && grp[turn] && !real.some(id => !own(turn, { id })) && !foul;
+        over = true; endT = 1.2; winner = clear ? turn : 1 - turn; msg = clear ? 'Potted the 8 to finish.' : (foul ? 'Foul while potting the 8.' : 'The 8 went in too early.'); return;
       }
-      if (scratch) { cue.alive = true; cue.x = X0 + TW * .25; cue.y = Y0 + TH / 2; cue.vx = cue.vy = 0; for (let k = 0; k < 20; k++) { if (balls.some(o => o !== cue && o.alive && Math.hypot(o.x - cue.x, o.y - cue.y) < 2 * R + 1)) cue.x -= 26; else break; } setNote('Scratch'); }
-      const good = real.some(id => grp[turn] && own(turn, { id }));
-      if (foul || !good) { if (foul && !scratch) setNote('Foul'); turn = 1 - turn; api.turn(turn); }
-      phase = 'aim'; aim.reset(turn === 0 ? 0 : Math.PI); aim.ang = Math.atan2(balls[0].y - (Y0 + TH / 2), 0) * 0; aimAtNearest();
+      if (scratch) { cue.alive = true; cue.x = X0 + TW * .25; cue.y = Y0 + TH / 2; cue.vx = cue.vy = 0; }
+      const good = real.some(id => grp[turn] ? own(turn, { id }) : true);
+      if (foul || !good) { turn = 1 - turn; api.turn(turn); }
+      if (foul) { phase = 'place'; setNote(scratch ? 'Scratch: ball in hand' : 'Foul: ball in hand'); placeFix(); plan = null; }
+      else { phase = 'aim'; aim.reset(turn === 0 ? 0 : Math.PI); aimAtNearest(); }
     }
+    function freeAt(x, y) { return x > X0 + R && x < X0 + TW - R && y > Y0 + R && y < Y0 + TH - R && !balls.some(o => o.id !== 0 && o.alive && Math.hypot(o.x - x, o.y - y) < 2 * R + 1); }
+    function placeFix() { const c = balls[0]; if (freeAt(c.x, c.y)) return; for (let k = 1; k < 60; k++) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = c.x + dx * k * 8, y = c.y + dy * k * 8; if (freeAt(x, y)) { c.x = x; c.y = y; return; } } }
+    function tryPlace() { const c = balls[0]; if (!freeAt(c.x, c.y)) { api.beep('no'); return; } phase = 'aim'; aim.reset(turn === 0 ? 0 : Math.PI); aimAtNearest(); api.beep('place'); }
+    let plan = null;
     function aimAtNearest() { const c = balls[0]; let best = null, bd = 1e9; for (const b of balls) if (b.alive && b.id !== 0) { const d = Math.hypot(b.x - c.x, b.y - c.y); if (d < bd) { bd = d; best = b; } } if (best) aim.ang = Math.atan2(best.y - c.y, best.x - c.x); }
     function simShot(ang, f) {
-      const sb = balls, sp = potted, sf = firstHit; simming = true;
-      balls = sb.map(b => Object.assign({}, b)); potted = []; firstHit = -1;
+      const sb = balls, sp = potted, sf = firstHit, sr = railHit; simming = true;
+      balls = sb.map(b => Object.assign({}, b)); potted = []; firstHit = -1; railHit = false; railHit = false;
       const c = balls[0], s = 160 + f * 1250; c.vx = Math.cos(ang) * s; c.vy = Math.sin(ang) * s;
       for (let k = 0; k < 420; k++) { physics(1 / 30); if (balls.every(b => !b.alive || (b.vx === 0 && b.vy === 0))) break; }
-      const r = { potted, firstHit, cueAlive: balls[0].alive }; balls = sb; potted = sp; firstHit = sf; simming = false; return r;
+      const r = { potted, firstHit, cueAlive: balls[0].alive, rail: railHit }; balls = sb; potted = sp; firstHit = sf; railHit = sr; simming = false; return r;
     }
     function rateShot(r) {
       const real = r.potted.filter(id => id > 0 && id !== 8), scratch = !r.cueAlive; let v = 0;
@@ -7870,31 +8371,45 @@ registerGame({
       if (!cand.length) for (const b of targets) cand.push(Math.atan2(b.y - c.y, b.x - c.x));
       let best = null, bs = -1e9; const pool = [];
       for (const a of cand) for (const f of [.4, .62, .85]) { const v = rateShot(simShot(a, f)) + rand(0, [14, 3, .5][L]); pool.push([v, a, f]); if (v > bs) { bs = v; best = [a, f]; } }
-      if (L === 0 && pool.length > 3) { pool.sort((x, y) => y[0] - x[0]); const pk = pool[irand(Math.min(5, pool.length))]; best = [pk[1], pk[2]]; }
+      if (L === 0 && pool.length > 3) { pool.sort((x, y) => y[0] - x[0]); const pk = pool[irand(0, Math.min(5, pool.length) - 1)]; best = [pk[1], pk[2]]; }
       if (!best) { const t0 = balls.find(b => b.alive && b.id !== 0); best = [t0 ? Math.atan2(t0.y - c.y, t0.x - c.x) : 0, .5]; }
       return best;
     }
     return {
       ai(i, dt) {
-        const Z = this.zs || (this.zs = []); if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
+        const Z = this.zs || (this.zs = []);
+        if (phase === 'place' && !over && turn === i) {
+          const c = balls[0], L = api.cpu;
+          if (!plan) {
+            const tg = balls.filter(b => b.alive && b.id !== 0 && (grp[i] ? (ownLeft(i) === 0 ? b.id === 8 : own(i, b)) : b.id !== 8)); let best = null, bs = -1e9;
+            for (const b of tg) for (const p of POCK) { const dx = p[0] - b.x, dy = p[1] - b.y, d = Math.hypot(dx, dy) || 1, x = b.x - dx / d * (2 * R + 70 + rand(0, 40)), y = b.y - dy / d * (2 * R + 70 + rand(0, 40)); if (!freeAt(x, y)) continue; const v = -d + rand(0, [900, 200, 40][L]); if (v > bs) { bs = v; best = [x, y]; } }
+            if (!best || L === 0 && rand() < .4) { best = [X0 + TW * .25, Y0 + TH / 2 + rand(-60, 60)]; }
+            plan = { x: best[0], y: best[1], w: .6 };
+          }
+          plan.w -= dt; const dx = plan.x - c.x, dy = plan.y - c.y, d = Math.hypot(dx, dy);
+          if (d < 6) { if (plan.w <= 0) { const o = { x: 0, y: 0, a: true }; return o; } return { x: 0, y: 0, a: false }; }
+          return { x: dx / d, y: dy / d, a: false };
+        }
+        if (phase !== 'aim' || over || turn !== i) { Z[i] = null; return null; }
         const L = api.cpu;
         if (!Z[i]) { const b = planShot(); Z[i] = { a: b[0] + rand(-1, 1) * [.04, .012, .003][L], f: clamp(b[1] + rand(-1, 1) * [.12, .05, .015][L], .1, 1), w: rand(.5, 1.1), st: 0 }; }
         return aimDrive(Z[i], aim, dt);
       },
       touch: 'Press, pull back from the cue ball and let go to shoot. The farther you pull, the harder.',
-      pointer(x, y, t) { if (phase === 'aim' && !over) aim.ptr(t, x, y, balls[0].x, balls[0].y); },
+      pointer(x, y, t) { if (phase === 'place' && !over) { const c = balls[0]; c.x = clamp(x, X0 + R, X0 + TW - R); c.y = clamp(y, Y0 + R, Y0 + TH - R); if (t === 'up') tryPlace(); return; } if (phase === 'aim' && !over) aim.ptr(t, x, y, balls[0].x, balls[0].y); },
       reset() {
         balls = [ball(0, X0 + TW * .25, Y0 + TH / 2)]; const ids = shuffle([1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]); const rack = []; let k = 0;
         for (let r = 0; r < 5; r++) for (let i = 0; i <= r; i++) { const cx = r === 2 && i === 1; rack.push(cx ? 8 : ids[k++]); }
         let q = 0; for (let r = 0; r < 5; r++) for (let i = 0; i <= r; i++) balls.push(ball(rack[q++], X0 + TW * .72 + r * (R * 1.75 + .5), Y0 + TH / 2 + (i - r / 2) * (2 * R + .6)));
-        turn = 0; phase = 'aim'; grp = [null, null]; potted = []; firstHit = -1; over = false; endT = 0; winner = -1; msg = ''; note = ''; noteT = 0; rollT = 0; aim.reset(Math.PI * 0); api.turn(0);
+        isBreak = true; railHit = false; plan = null; turn = 0; phase = 'aim'; grp = [null, null]; potted = []; firstHit = -1; over = false; endT = 0; winner = -1; msg = ''; note = ''; noteT = 0; rollT = 0; aim.reset(Math.PI * 0); api.turn(0);
       },
       update(dt) {
         noteT -= dt;
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
+        if (phase === 'place') { const s = api.input(turn), c = balls[0]; if (!s.ph) { c.x = clamp(c.x + s.x * 300 * dt, X0 + R, X0 + TW - R); c.y = clamp(c.y + s.y * 300 * dt, Y0 + R, Y0 + TH - R); } if (s.pa) tryPlace(); return; }
         if (phase === 'aim') {
           const f = aim.step(api.input(turn), dt, 1.5);
-          if (f >= 0) { const c = balls[0], sp = 160 + f * 1250; c.vx = Math.cos(aim.ang) * sp; c.vy = Math.sin(aim.ang) * sp; phase = 'roll'; potted = []; firstHit = -1; rollT = 0; api.beep('hit'); }
+          if (f >= 0) { const c = balls[0], sp = 160 + f * 1250; c.vx = Math.cos(aim.ang) * sp; c.vy = Math.sin(aim.ang) * sp; phase = 'roll'; potted = []; firstHit = -1; railHit = false; rollT = 0; api.beep('hit'); }
         } else {
           rollT += dt; physics(dt);
           if (rollT > 18) balls.forEach(b => { b.vx = b.vy = 0; });
@@ -7913,6 +8428,7 @@ registerGame({
           else { D.disc(g, b.x, b.y, R, '#F3F6F8'); g.fillStyle = BC[b.id - 8]; g.fillRect(b.x - R, b.y - 5, 2 * R, 10); g.save(); g.beginPath(); g.arc(b.x, b.y, R, 0, TAU); g.restore(); }
           if (b.id) { D.disc(g, b.x, b.y, 5.5, '#F3F6F8'); D.text(g, b.id, b.x, b.y + .5, 9, '#10161C', 'center', 800); }
         }
+        if (phase === 'place' && !over) { const c = balls[0]; g.strokeStyle = freeAt(c.x, c.y) ? '#3DDC97' : '#FF4A3D'; g.lineWidth = 3; g.setLineDash([5, 5]); g.beginPath(); g.arc(c.x, c.y, R + 8, 0, TAU); g.stroke(); g.setLineDash([]); D.text(g, api.players[turn].name + ': place the cue ball, then click or press A', W / 2, 584, 16, SCR.dim); }
         if (phase === 'aim' && !over) {
           const c = balls[0], d = [Math.cos(aim.ang), Math.sin(aim.ang)];
           g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 2; g.setLineDash([6, 8]); g.beginPath(); g.moveTo(c.x + d[0] * R, c.y + d[1] * R); g.lineTo(c.x + d[0] * 220, c.y + d[1] * 220); g.stroke(); g.setLineDash([]);
@@ -8030,12 +8546,12 @@ registerGame({
 registerGame({
   id: 'cuppong', cpu: true, title: 'Cup Pong', blurb: 'Flick the ball up the table with a swipe. Land it in your rival\'s cups.',
   kind: 'turns', min: 2, max: 2, color: 1,
-  help: 'Swipe up the table from the ball: the direction of your swipe sets where it flies and how fast you flick sets how far. A short slow swipe lands near, a quick long flick lands at the back. On a pad or keys, left and right aim, hold A to charge and release to throw. Clear all six enemy cups to win.',
+  help: 'Swipe up the table from the ball: the direction of your swipe sets where it flies and how fast you flick sets how far. A short slow swipe lands near, a quick long flick lands at the back. On a pad or keys, left and right aim, hold A to charge and release to throw. Each turn you throw two balls; sink both and you get balls back for two more. Clear all six enemy cups to win, but if you clear them first your rival gets a rebuttal: they keep throwing until they miss, and if they clear all your cups too it goes to three cups each.',
   icon() { let s = ''; [[70, 36], [100, 36], [130, 36], [85, 66], [115, 66], [100, 96]].forEach(([x, y]) => { s += `<path d="M${x - 12} ${y - 14}h24l-4 26h-16z" fill="none" stroke="#0F1923" stroke-width="4" stroke-linejoin="round"/>`; }); return `<svg viewBox="0 0 200 125">${s}</svg>`; },
   create(api) {
     const col = i => api.players[i].color, CR = 22;
     const POS = (() => { const a = []; for (let r = 0; r < 3; r++) for (let i = 0; i < 3 - r; i++) a.push([480 + (i - (2 - r) / 2) * 56, 126 + r * 46]); return a; })();
-    let sw = { on: false, pts: [] }, cups, turn, phase, t, lx, ly, throwT, hitIdx, over, endT, winner, thrown, msg, flash, aim = makeAimer();
+    let sw = { on: false, pts: [] }, starter = 0, shotsLeft = 2, hitsT = 0, bb = false, reb = false, ot = false, cups, turn, phase, t, lx, ly, throwT, hitIdx, over, endT, winner, thrown, msg, flash, aim = makeAimer();
     const BX = 480, BY = 548, dist = f => 120 + f * 420, lim = a => clamp(a, -Math.PI / 2 - .7, -Math.PI / 2 + .7);
     const landOf = (a, f) => [BX + Math.cos(a) * dist(f), BY + Math.sin(a) * dist(f)];
     return {
@@ -8063,7 +8579,7 @@ registerGame({
           aim.ang = a; lx = l[0]; ly = l[1]; phase = 'fly'; throwT = .6; sw.pts = []; api.beep('select');
         }
       },
-      reset(r) { cups = [Array(6).fill(true), Array(6).fill(true)]; turn = r % 2; phase = 'aim'; aim.reset(-Math.PI / 2); sw = { on: false, pts: [] }; t = 0; thrown = [0, 0]; over = false; endT = 0; winner = -1; msg = ''; flash = 0; api.turn(turn); },
+      reset(r) { cups = [Array(6).fill(true), Array(6).fill(true)]; turn = r % 2; starter = turn; shotsLeft = 2; hitsT = 0; bb = false; reb = false; ot = false; phase = 'aim'; aim.reset(-Math.PI / 2); sw = { on: false, pts: [] }; t = 0; thrown = [0, 0]; over = false; endT = 0; winner = -1; msg = ''; flash = 0; api.turn(turn); },
       update(dt) {
         t += dt; flash -= dt;
         if (over) { endT -= dt; if (endT <= 0) api.endRound(winner, msg); return; }
@@ -8082,10 +8598,25 @@ registerGame({
           }
         } else if (phase === 'res') {
           throwT -= dt; if (throwT <= 0) {
-            const left = [cups[0].filter(Boolean).length, cups[1].filter(Boolean).length];
-            if (left[1 - turn] === 0) { over = true; endT = .8; winner = turn; msg = 'All six cups cleared.'; return; }
-            if (thrown[0] >= 12 && thrown[1] >= 12) { over = true; endT = .8; winner = left[0] === left[1] ? -1 : left[0] > left[1] ? 0 : 1; msg = `${left[0]} cups against ${left[1]}.`; return; }
-            turn = 1 - turn; api.turn(turn); phase = 'aim'; aim.reset(-Math.PI / 2); sw = { on: false, pts: [] }; t = 0;
+            const left = [cups[0].filter(Boolean).length, cups[1].filter(Boolean).length], hit = hitIdx >= 0, nextAim = () => { phase = 'aim'; aim.reset(-Math.PI / 2); sw = { on: false, pts: [] }; t = 0; api.turn(turn); };
+            if (reb) {
+              if (hit && left[1 - turn] === 0) {
+                cups = [[true, true, true, false, false, false], [true, true, true, false, false, false]]; reb = false; ot = true; turn = starter; shotsLeft = 2; hitsT = 0; bb = false; thrown = [0, 0]; msg = 'Rebuttal made! Three cups each.'; flash = .9; nextAim(); return;
+              }
+              if (hit) { msg = 'Rebuttal: keep going'; nextAim(); return; }
+              over = true; endT = .8; winner = starter; msg = 'Rebuttal missed. Game over.'; return;
+            }
+            if (left[1 - turn] === 0) {
+              if (turn === starter && !ot) { reb = true; turn = 1 - turn; shotsLeft = 1; msg = 'Last cup! Rebuttal: sink every cup to stay alive.'; flash = .9; nextAim(); return; }
+              over = true; endT = .8; winner = turn; msg = 'All cups cleared.'; return;
+            }
+            if (thrown[0] >= 24 && thrown[1] >= 24) { over = true; endT = .8; winner = left[0] === left[1] ? -1 : left[0] > left[1] ? 0 : 1; msg = `${left[0]} cups against ${left[1]}.`; return; }
+            if (hit) hitsT++; shotsLeft--;
+            if (shotsLeft <= 0) {
+              if (hitsT >= 2 && !bb) { bb = true; shotsLeft = 2; hitsT = 0; msg = 'Balls back! Throw again.'; flash = .9; nextAim(); return; }
+              turn = 1 - turn; shotsLeft = 2; hitsT = 0; bb = false;
+            }
+            nextAim();
           }
         }
       },
@@ -8162,7 +8693,7 @@ registerGame({
           }
         } else if (phase === 'res') {
           pt -= dt; if (pt <= 0) {
-            if (shots[0].length >= 5 && shots[1].length >= 5) { over = true; endT = .8; winner = total(0) === total(1) ? -1 : total(0) > total(1) ? 0 : 1; return; }
+            if (shots[0].length >= 5 && shots[1].length >= 5) { over = true; endT = .8; winner = total(0) === total(1) ? tieClose() : total(0) > total(1) ? 0 : 1; return; }
             turn = 1 - turn; api.turn(turn); phase = 'aim'; nextArrow();
           }
         }
@@ -8199,6 +8730,7 @@ registerGame({
     let pucks, turn, count, phase, aim = makeAimer(), over, endT, winner, rollT, cur, note, noteT;
     const pts = p => { const d = Math.hypot(p.x - CX, p.y - CY); for (const [r, v] of RING) if (d < r + PR * .6) return v; return 0; };
     const total = i => pucks.filter(p => p.alive && p.o === i).reduce((a, p) => a + pts(p), 0);
+    const tieClose = () => { const dm = i => Math.min(1e9, ...pucks.filter(p => p.alive && p.o === i).map(p => Math.hypot(p.x - CX, p.y - CY))); const a = dm(0), b = dm(1); return Math.abs(a - b) < 1 || (a > 1e8 && b > 1e8) ? -1 : a < b ? 0 : 1; };
     function simPuck(ang, f, me) {
       const ps = pucks.map(p => ({ x: p.x, y: p.y, vx: p.vx, vy: p.vy, o: p.o, alive: p.alive }));
       ps.push({ x: SX, y: SY, vx: Math.cos(ang) * (260 + f * 1150), vy: Math.sin(ang) * (260 + f * 1150), o: me, alive: true });
@@ -8429,7 +8961,7 @@ registerGame({
     return `<svg viewBox="0 0 200 125">${s}</svg>`;
   },
   create(api) {
-    const R = 6, C = 9, CS = 68, X0 = (W - C * CS) / 2, Y0 = 112, col = i => api.players[i].color, n = api.n;
+    const n = api.n, R = n > 3 ? 8 : n > 2 ? 7 : 6, C = n > 3 ? 13 : n > 2 ? 11 : 9, CS = n > 3 ? 54 : n > 2 ? 56 : 68, SC = CS / 68, X0 = (W - C * CS) / 2, Y0 = n > 3 ? 96 : n > 2 ? 104 : 112, col = i => api.players[i].color;
     let cells, turn, moved, phase, t, anim, parts, rings, shake, cr, cc, rep = repeater(), over, endT, winner, waves, last, msg;
     const nb = (r, c) => { const a = []; if (r > 0) a.push([r - 1, c]); if (r < R - 1) a.push([r + 1, c]); if (c > 0) a.push([r, c - 1]); if (c < C - 1) a.push([r, c + 1]); return a; };
     const cap = (r, c) => nb(r, c).length;
@@ -8489,7 +9021,7 @@ registerGame({
       },
       reset(rd) {
         cells = Array.from({ length: R }, () => Array.from({ length: C }, () => ({ o: -1, n: 0 })));
-        turn = rd % n; moved = Array(n).fill(false); phase = 'aim'; t = 0; anim = 0; parts = []; rings = []; shake = 0; cr = 2; cc = 4; over = false; endT = 0; winner = -1; waves = 0; last = null; msg = ''; api.turn(turn);
+        turn = rd % n; moved = Array(n).fill(false); phase = 'aim'; t = 0; anim = 0; parts = []; rings = []; shake = 0; cr = R >> 1; cc = C >> 1; over = false; endT = 0; winner = -1; waves = 0; last = null; msg = ''; api.turn(turn);
       },
       update(dt) {
         anim += dt; shake = Math.max(0, shake - dt * 30);
@@ -8515,8 +9047,8 @@ registerGame({
       draw(g) {
         const sx = shake ? Math.sin(anim * 90) * shake * .6 : 0, sy = shake ? Math.cos(anim * 77) * shake * .6 : 0;
         g.save(); g.translate(sx, sy);
-        D.text(g, over ? api.players[winner].name + ' wins' : api.players[turn].name + "'s move", W / 2, 40, 34, over ? SCR.fg : col(turn));
-        D.text(g, phase === 'chain' ? 'Chain reaction' + (waves > 1 ? ' x' + waves : '') : '', W / 2, 78, 18, '#FFC933', 'center', 700);
+        D.text(g, over ? api.players[winner].name + ' wins' : api.players[turn].name + "'s move", W / 2, n > 2 ? 34 : 40, n > 2 ? 30 : 34, over ? SCR.fg : col(turn));
+        D.text(g, phase === 'chain' ? 'Chain reaction' + (waves > 1 ? ' x' + waves : '') : '', W / 2, n > 2 ? 66 : 78, 18, '#FFC933', 'center', 700);
         g.fillStyle = '#10202E'; D.rr(g, X0 - 10, Y0 - 10, C * CS + 20, R * CS + 20, 16); g.fill();
         for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
           const x = X0 + c * CS, y = Y0 + r * CS, cell = cells[r][c], k = cap(r, c), crit = cell.n >= k - 1 && cell.n > 0, jx = crit ? Math.sin(anim * 40 + r * 3 + c) * (cell.n >= k - 1 ? 1.4 : 0) : 0;
@@ -8524,19 +9056,19 @@ registerGame({
           g.strokeStyle = cell.o >= 0 ? col(cell.o) : '#223548'; g.lineWidth = cell.o >= 0 ? 3 : 2; D.rr(g, x + 3, y + 3, CS - 6, CS - 6, 10); g.stroke();
           if (last && last[0] === r && last[1] === c && phase === 'chain') { g.strokeStyle = SCR.fg; g.lineWidth = 2; D.rr(g, x + 1, y + 1, CS - 2, CS - 2, 11); g.stroke(); }
           if (cell.n) {
-            const m = cell.n, spd = 1.2 + (m / k) * 4, rad = m === 1 ? 0 : 9 + m * 2.2;
+            const m = cell.n, spd = 1.2 + (m / k) * 4, rad = m === 1 ? 0 : (9 + m * 2.2) * SC, OR = 9 * SC;
             for (let i = 0; i < m; i++) {
               const a = anim * spd + (i / m) * TAU, ox = Math.cos(a) * rad + jx, oy = Math.sin(a) * rad;
-              D.disc(g, x + CS / 2 + ox + 1.5, y + CS / 2 + oy + 2.5, 9, 'rgba(0,0,0,.3)'); D.disc(g, x + CS / 2 + ox, y + CS / 2 + oy, 9, col(cell.o)); D.disc(g, x + CS / 2 + ox - 3, y + CS / 2 + oy - 3, 3, 'rgba(255,255,255,.5)');
+              D.disc(g, x + CS / 2 + ox + 1.5, y + CS / 2 + oy + 2.5, OR, 'rgba(0,0,0,.3)'); D.disc(g, x + CS / 2 + ox, y + CS / 2 + oy, OR, col(cell.o)); D.disc(g, x + CS / 2 + ox - 3 * SC, y + CS / 2 + oy - 3 * SC, 3 * SC, 'rgba(255,255,255,.5)');
             }
           }
         }
-        for (const q of rings) { g.strokeStyle = q.col; g.globalAlpha = 1 - q.t; g.lineWidth = 6 * (1 - q.t) + 1; g.beginPath(); g.arc(q.x, q.y, 14 + q.t * 62 * q.s, 0, TAU); g.stroke(); g.globalAlpha = 1; }
-        for (const p of parts) { const e = 1 - (1 - p.t) * (1 - p.t), x = p.x0 + (p.x1 - p.x0) * e, y = p.y0 + (p.y1 - p.y0) * e - Math.sin(p.t * Math.PI) * 14; D.disc(g, x, y, 9 - p.t * 2, p.col); D.disc(g, x - 3, y - 3, 3, 'rgba(255,255,255,.6)'); }
+        for (const q of rings) { g.strokeStyle = q.col; g.globalAlpha = 1 - q.t; g.lineWidth = 6 * (1 - q.t) + 1; g.beginPath(); g.arc(q.x, q.y, (14 + q.t * 62 * q.s) * SC, 0, TAU); g.stroke(); g.globalAlpha = 1; }
+        for (const p of parts) { const e = 1 - (1 - p.t) * (1 - p.t), x = p.x0 + (p.x1 - p.x0) * e, y = p.y0 + (p.y1 - p.y0) * e - Math.sin(p.t * Math.PI) * 14; D.disc(g, x, y, (9 - p.t * 2) * SC, p.col); D.disc(g, x - 3, y - 3, 3, 'rgba(255,255,255,.6)'); }
         if (phase === 'aim' && !over) {
           const x = X0 + cc * CS, y = Y0 + cr * CS, ok = cells[cr][cc].o === -1 || cells[cr][cc].o === turn, pul = .5 + .5 * Math.sin(anim * 6);
           g.strokeStyle = ok ? col(turn) : '#8896A4'; g.lineWidth = 4; g.setLineDash(ok ? [] : [6, 6]); D.rr(g, x + 1, y + 1, CS - 2, CS - 2, 11); g.stroke(); g.setLineDash([]);
-          if (ok) { g.globalAlpha = .25 + pul * .25; D.disc(g, x + CS / 2, y + CS / 2, 13, col(turn)); g.globalAlpha = 1; }
+          if (ok) { g.globalAlpha = .25 + pul * .25; D.disc(g, x + CS / 2, y + CS / 2, 13 * SC, col(turn)); g.globalAlpha = 1; }
         }
         g.restore();
         const share = i => { let tot = 0; for (let j = 0; j < n; j++) tot += count(j); return tot ? count(i) / tot : 0; };
@@ -8570,12 +9102,13 @@ registerGame({
         let tg = null, bd = 1e9; tops.forEach((o, k) => { if (k !== i && o.alive) { const d = Math.hypot(o.x - p.x, o.y - p.y); if (d < bd) { bd = d; tg = o; } } });
         const rc = Math.hypot(p.x - CX, p.y - CY); let dx, dy;
         if (rc > AR - [110, 80, 60][L] && (p.vx * (p.x - CX) + p.vy * (p.y - CY)) > -20) { dx = CX - p.x; dy = CY - p.y; }
-        else if (tg) { /* lead the target a little, then drive through it toward the far edge */ dx = tg.x + tg.vx * .15 - p.x; dy = tg.y + tg.vy * .15 - p.y; }
+        else if (tg) { const ux = tg.x - CX, uy = tg.y - CY, um = Math.hypot(ux, uy) || 1, off = bd > 130 ? 52 : 0; dx = tg.x + tg.vx * .15 + ux / um * off - p.x; dy = tg.y + tg.vy * .15 + uy / um * off - p.y; }
         else { dx = CX - p.x; dy = CY - p.y; }
         const m = Math.hypot(dx, dy) || 1; let a = false;
         if (tg && bd < 95 && p.cd <= 0 && p.spin > .3 && rc < AR - 90 && rand() < [.02, .05, .1][L]) { a = true; st.p = true; }
         return { x: dx / m, y: dy / m, a };
       },
+      dbg: () => ({ tops: tops.map(p => [p.x | 0, p.y | 0, p.vx | 0, p.vy | 0, +p.spin.toFixed(2), p.alive]) }),
       dragAxes: 'xy', drag: i => tops[i].alive ? tops[i] : null, touch: 'Move your finger or mouse and your top chases it. Click or press for a speed burst.',
       reset() {
         tops = []; for (let i = 0; i < n; i++) { const a = i / n * TAU - Math.PI / 2; tops.push({ x: CX + Math.cos(a) * 160, y: CY + Math.sin(a) * 160, vx: 0, vy: 0, spin: 1, cd: 0, alive: true, fall: 0 }); }
@@ -8589,13 +9122,13 @@ registerGame({
           const p = tops[i]; if (!p.alive) { p.fall += dt; continue; }
           const s = api.input(i), k = .35 + .65 * p.spin; p.cd -= dt;
           p.vx += s.x * 560 * k * dt; p.vy += s.y * 560 * k * dt;
-          const dx = CX - p.x, dy = CY - p.y, d = Math.hypot(dx, dy) || 1; p.vx += dx / d * (d / AR) * 230 * dt; p.vy += dy / d * (d / AR) * 230 * dt;
+          const dx = CX - p.x, dy = CY - p.y, d = Math.hypot(dx, dy) || 1; p.vx += dx / d * (d / AR) * 520 * dt; p.vy += dy / d * (d / AR) * 520 * dt;
           if (s.pa && p.cd <= 0 && p.spin > .12) { const m = Math.hypot(s.x, s.y), ux = m > .2 ? s.x / m : p.vx / (Math.hypot(p.vx, p.vy) || 1), uy = m > .2 ? s.y / m : p.vy / (Math.hypot(p.vx, p.vy) || 1); p.vx += ux * 430; p.vy += uy * 430; p.spin -= .07; p.cd = 1.1; api.beep('select'); }
-          const f = Math.exp(-.7 * dt); p.vx *= f; p.vy *= f; p.x += p.vx * dt; p.y += p.vy * dt; p.spin -= .028 * dt;
+          const f = Math.exp(-1.5 * dt); p.vx *= f; p.vy *= f; { const sp = Math.hypot(p.vx, p.vy); if (sp > 620) { p.vx *= 620 / sp; p.vy *= 620 / sp; } } p.x += p.vx * dt; p.y += p.vy * dt; p.spin -= .02 * dt;
         }
         for (let i = 0; i < n; i++) if (tops[i].alive) for (let j = i + 1; j < n; j++) if (tops[j].alive) {
           const a = tops[i], b = tops[j], rv = Math.hypot(b.vx - a.vx, b.vy - a.vy);
-          if (bumpBalls(a, b, TR, 1.05)) { api.beep('hit'); const sa = a.spin, sb = b.spin; a.spin -= rv * .00045 * (1.2 - sa * .4) - .005; b.spin -= rv * .00045 * (1.2 - sb * .4) - .005; }
+          if (bumpBalls(a, b, TR, .8)) { api.beep('hit'); const sa = a.spin, sb = b.spin; a.spin -= rv * .00011 * (1.2 - sa * .4); b.spin -= rv * .00011 * (1.2 - sb * .4); }
         }
         for (const p of tops) if (p.alive && (Math.hypot(p.x - CX, p.y - CY) > AR + 6 || p.spin <= 0)) { p.alive = false; p.fall = 0; api.beep('die'); }
         const live = tops.map((p, i) => p.alive ? i : -1).filter(i => i >= 0);
