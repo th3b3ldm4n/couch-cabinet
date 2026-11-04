@@ -3,5 +3,6 @@ services:
     name: couch-cabinet
     runtime: node
     plan: free
+    region: singapore
     buildCommand: npm install
     startCommand: npm start
